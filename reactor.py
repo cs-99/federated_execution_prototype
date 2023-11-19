@@ -2,6 +2,8 @@
 This is a prototype for the decentralized coordination contract used for federated (and enclaves) execution of Lingua Franca
 """
 from __future__ import annotations
+from ast import Call
+from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 import threading
 # custom files from here
@@ -20,7 +22,7 @@ class Named:
         return f"{self.__class__.__name__} {self._name}"
 
 class RegisteredReactor:
-    def __init__(self, reactor) -> None:
+    def __init__(self, reactor : Reactor) -> None:
         assert isinstance(reactor, Reactor)
         self._reactor : Reactor = reactor
 
@@ -29,7 +31,7 @@ class RegisteredReactor:
         return self._reactor
 
 class Action(Named, RegisteredReactor):
-    def __init__(self, name, reactor):
+    def __init__(self, name, reactor : Reactor):
         Named.__init__(self, name)
         RegisteredReactor.__init__(self, reactor)
         self._function : Callable[..., None] = lambda x: None
@@ -41,28 +43,38 @@ class Action(Named, RegisteredReactor):
         print("Action " + self._name + " executing.")
         self._function(args)
 
-class Timer(Action):
-    def __init__(self, name, reactor, start_time = 0, interval = 0):
+@dataclass
+class TimerDeclaration:
+    name : str
+    offset : int
+    interval : int
+
+class TriggerAction(Action):
+    def __init__(self, name, reactor: Reactor):
         super().__init__(name, reactor)
-        self._start_time : int = start_time
+
+class Timer(TriggerAction):
+    def __init__(self, name, reactor : Reactor, offset = 0, interval = 0):
+        super().__init__(name, reactor)
+        self._offset : int = offset
         self._interval : int = interval
 
 
 class Port(Named, RegisteredReactor):
-    def __init__(self, name, reactor):
+    def __init__(self, name, reactor : Reactor):
         Named.__init__(self, name)
         RegisteredReactor.__init__(self, reactor)
 
 """
 Input and Output are directly the endpoints for communication
 """
-class Input(Port, Action):
-    def __init__(self, name, reactor):
+class Input(Port, TriggerAction):
+    def __init__(self, name, reactor  : Reactor):
         Port.__init__(self, name, reactor)
-        Action.__init__(self, name, reactor)
+        TriggerAction.__init__(self, name, reactor)
 
 class Output(Port):
-    def __init__(self, name, reactor):
+    def __init__(self, name, reactor : Reactor):
         super().__init__(name, reactor)
         reactor.register_release_tag_callback(lambda tag: CommunicationBus().set_tag_only(self, tag))
 
@@ -127,6 +139,12 @@ class CommunicationBus(metaclass=utility.Singleton):
                 connection.set_tag_only(tag)
         self._connection_lock.release()
 
+@dataclass
+class ReactionDeclaration:
+    name: str
+    triggers: List[str]
+    effects: List[str]
+
         
 class Reaction(Action):
     def __init__(self, name, reactor, triggers=None, effects=None):
@@ -154,36 +172,50 @@ class Reaction(Action):
 Every Reactor is considered federate, therefore has their own scheduling (see run())
 """
 class Reactor(Named):
-    def __init__(self, name, start_tag, stop_tag, inputs: List[str]=None, outputs: List[str]=None, reactions:List[Tuple[List[str], List[str]]]=None):
+    def __init__(self, name, start_tag, stop_tag, inputs: List[str]=None, outputs: List[str]=None, 
+                reactions:List[ReactionDeclaration]=None, timers: List[TimerDeclaration] = None):
         assert start_tag < stop_tag
         super().__init__(name)
         self._release_tag_callbacks : List[Callable[[Tag], None]] = []
-        self._inputs = [Input(input, self) for input in inputs] if inputs is not None else []
+        self._inputs : List[Input]= [Input(input, self) for input in inputs] if inputs is not None else []
         self._outputs : List[Output]= [Output(output, self) for output in outputs] if outputs is not None else []
-        self._reactions : List[Reaction] = [self._init_reaction(reaction) for reaction in reactions] if reactions is not None else []
+        self._timers : List[Timer] = [self._init_timer(timer) for timer in timers] if timers is not None else []
+        # assigning empty list first to make sure _find_member_by_name works (it searches that list too)
+        self._reactions : List[Reaction] = []
+        self._reactions = [self._init_reaction(reaction) for reaction in reactions] if reactions is not None else []
+        
         self._start_tag : Tag = start_tag
         self._stop_tag : Tag = stop_tag
         self._current_tag : Tag = self._start_tag.decrement()
         self._action_q : List[Action] = []
+
+        get_name_from_named : Callable[[Named], str] = lambda m : m.name
+        all_names : List[str] = list(map(get_name_from_named, self._inputs + self._outputs + self._timers + self._reactions))
+        for name in all_names:
+            if all_names.count(name) > 1:
+                raise ValueError(f"Reactor {self._name} contains duplicate member name '{name}'.")
         
 
-    def _init_reaction(self, reaction : Tuple[str, List[str], List[str]]) -> Reaction:
+
+    def _init_reaction(self, reaction : ReactionDeclaration) -> Reaction:
         triggers = []
-        for input_name in reaction[1]:
-            input = self.find_input_by_name(input_name)
-            if input is None:
-                raise ValueError(f"Input {input_name} not in {self.name}.")
-            triggers.append(input)
+        for trigger_name in reaction.triggers:
+            trigger = self._find_member_by_name(trigger_name)
+            if trigger is None or not isinstance(trigger, TriggerAction):
+                raise ValueError(f"Trigger {trigger_name} not in {self.name}.")
+            triggers.append(trigger)
 
         effects = []
-        for output_name in reaction[2]:
-            output = self.find_output_by_name(output_name)
-            if output is None:
+        for output_name in reaction.effects:
+            output = self._find_member_by_name(output_name)
+            if output is None or not isinstance(output, Output):
                 raise ValueError(f"Output {output_name} not in {self.name}.")
             effects.append(output)
 
-        return Reaction(reaction[0], self, triggers, effects)
-        
+        return Reaction(reaction.name, self, triggers, effects)
+
+    def _init_timer(self, timer : TimerDeclaration) -> Timer:
+        return Timer(timer.name, self, timer.offset, timer.interval)
 
     def __repr__(self) -> str:
         r = super().__repr__()
@@ -194,6 +226,7 @@ class Reactor(Named):
         return r
 
     def register_release_tag_callback(self, callback):
+        assert isinstance(callback, Callable)
         self._release_tag_callbacks.append(callback)
 
     @property
@@ -208,14 +241,14 @@ class Reactor(Named):
     def ports(self) -> List[Port]:
         return self._inputs + self._outputs
 
-    def find_input_by_name(self, name) -> Optional[ports.Input]:
-        return self.find_port_by_name(self._inputs, name)
-
-    def find_output_by_name(self, name) -> Optional[ports.Output]:
-        return self.find_port_by_name(self._outputs, name)
+    def _find_member_by_name(self, name) -> Optional[Named]:
+        for member in self._inputs + self._outputs + self._reactions + self._timers:
+            if member.name == name:
+                return member
+        return None
 
     @staticmethod
-    def find_port_by_name(ports, name) -> Optional[ports.Port]:
+    def find_port_by_name(ports : List[Port], name : str) -> Optional[Port]:
         for port in ports:
             if port.name == name:
                 return port

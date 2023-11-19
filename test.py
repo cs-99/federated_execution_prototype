@@ -1,7 +1,7 @@
 import random
 from typing import List
 
-from reactor import Reactor
+from reactor import Reactor, ReactionDeclaration
 from tag import Tag
 from utility import secs_to_ns
 
@@ -19,7 +19,7 @@ def create_random_reactor(name : str, start_tag : Tag, stop_tag : Tag) -> Reacto
                 triggers.append(input)
 
         effects = [output for output in outputs if random.choice([True, False])]
-        reactions.append((f"reaction{i}",triggers, effects))
+        reactions.append(ReactionDeclaration(f"reaction{i}",triggers, effects))
     return Reactor(name, start_tag, stop_tag, inputs, outputs, reactions)
 
 if __name__ == "__main__":
