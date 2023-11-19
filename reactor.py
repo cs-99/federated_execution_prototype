@@ -9,9 +9,8 @@ from tag import Tag
 import utility
     
 class Named:
-    _name : str
     def __init__(self, name) -> None:
-        self._name = name
+        self._name : str = name
 
     @property
     def name(self) -> str:
@@ -21,21 +20,19 @@ class Named:
         return f"{self.__class__.__name__} {self._name}"
 
 class RegisteredReactor:
-    _reactor : Reactor
-
     def __init__(self, reactor) -> None:
         assert isinstance(reactor, Reactor)
-        self._reactor = reactor
+        self._reactor : Reactor = reactor
 
     @property
     def reactor(self) -> Reactor:
         return self._reactor
 
 class Action(Named, RegisteredReactor):
-    _function : Callable[..., None]
     def __init__(self, name, reactor):
         Named.__init__(self, name)
         RegisteredReactor.__init__(self, reactor)
+        self._function : Callable[..., None] = lambda x: None
 
     def set_func(self, function):
         self._function = function
@@ -45,12 +42,10 @@ class Action(Named, RegisteredReactor):
         self._function(args)
 
 class Timer(Action):
-    _start_time : int
-    _interval : int
     def __init__(self, name, reactor, start_time = 0, interval = 0):
         super().__init__(name, reactor)
-        self._start_time = start_time
-        self._interval = interval
+        self._start_time : int = start_time
+        self._interval : int = interval
 
 
 class Port(Named, RegisteredReactor):
@@ -72,11 +67,6 @@ class Output(Port):
         reactor.register_release_tag_callback(lambda tag: CommunicationBus().set_tag_only(self, tag))
 
 class Connection:
-        _input : Input
-        _output : Output
-        _is_set : bool = False
-        _tag : Optional[tag.Tag] = None
-
         @property 
         def input(self) -> Input:
             return self._input
@@ -96,8 +86,10 @@ class Connection:
         def __init__(self, output, input) -> None:
             if not isinstance(output, Output) or not isinstance(input, Input):
                 raise ValueError("Connections must consist of output and input.")
-            self._input = input
-            self._output = output
+            self._input : Input = input
+            self._output : Output = output
+            self._is_set : bool = False
+            self._tag : Optional[Tag] = None
 
         def set_message(self, tag) -> None:
             self._is_set = True
@@ -112,10 +104,9 @@ class Connection:
             self._is_set = False
 
 class CommunicationBus(metaclass=utility.Singleton):
-    _connections : List[Connection] = []
-    _connection_lock : threading.Lock = threading.Lock()
     def __init__(self):
-        pass
+        self._connections : List[Connection] = []
+        self._connection_lock : threading.Lock = threading.Lock()
 
     def add_connection(self, output, input) -> None:
         self._connection_lock.acquire()
@@ -138,12 +129,10 @@ class CommunicationBus(metaclass=utility.Singleton):
 
         
 class Reaction(Action):
-    _triggers : List[Input]
-    _effects : List[Output]
     def __init__(self, name, reactor, triggers=None, effects=None):
         super().__init__(name, reactor)
-        self._triggers = triggers if triggers is not None else []
-        self._effects = effects if effects is not None else []
+        self._triggers : List[Input] = triggers if triggers is not None else []
+        self._effects : List[Output] = effects if effects is not None else []
         utility.list_instance_check(self._triggers, Input)
         utility.list_instance_check(self._effects, Output)
 
@@ -165,16 +154,18 @@ class Reaction(Action):
 Every Reactor is considered federate, therefore has their own scheduling (see run())
 """
 class Reactor(Named):
-    _inputs : List[ports.Input]
-    _outputs : List[ports.Input]
-    _reactions : List[Reaction]
-    _release_tag_callbacks : List[Callable[[Tag], None]] = []
-    def __init__(self, name, inputs: List[str]=None, outputs: List[str]=None, reactions:List[Tuple[List[str], List[str]]]=None):
+    def __init__(self, name, start_tag, stop_tag, inputs: List[str]=None, outputs: List[str]=None, reactions:List[Tuple[List[str], List[str]]]=None):
+        assert start_tag < stop_tag
         super().__init__(name)
+        self._release_tag_callbacks : List[Callable[[Tag], None]] = []
         self._inputs = [Input(input, self) for input in inputs] if inputs is not None else []
-        self._outputs = [Output(output, self) for output in outputs] if outputs is not None else []
-
-        self._reactions = [self._init_reaction(reaction) for reaction in reactions] if reactions is not None else []
+        self._outputs : List[Output]= [Output(output, self) for output in outputs] if outputs is not None else []
+        self._reactions : List[Reaction] = [self._init_reaction(reaction) for reaction in reactions] if reactions is not None else []
+        self._start_tag : Tag = start_tag
+        self._stop_tag : Tag = stop_tag
+        self._current_tag : Tag = self._start_tag.decrement()
+        self._action_q : List[Action] = []
+        
 
     def _init_reaction(self, reaction : Tuple[str, List[str], List[str]]) -> Reaction:
         triggers = []
@@ -230,7 +221,11 @@ class Reactor(Named):
                 return port
         return None
 
-    def run():
+    def _release_tag(self, tag):
+        for callback in self._release_tag_callbacks:
+            callback(tag)
+
+    def run(self):
         pass
 
 
