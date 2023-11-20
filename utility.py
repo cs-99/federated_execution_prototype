@@ -17,4 +17,7 @@ def list_instance_check(list, type) -> None:
 def secs_to_ns(time) -> int:
     return int(time * 1000000000)
 
+def ns_to_secs(time) -> float:
+    return time / 1000000000
+
 

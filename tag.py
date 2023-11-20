@@ -1,5 +1,6 @@
 from __future__ import annotations
 from time import time_ns
+from datetime import datetime
 
 class Tag:
     _UINT64_MAX : int = 18446744073709551615
@@ -38,6 +39,9 @@ class Tag:
     def __ge__(self, other : Tag) -> bool:
         return self > other or self == other
 
+    def __repr__(self) -> str:
+        return f"[{datetime.fromtimestamp(self.time/1e9)}, {self.microstep}]"
+
     def delay(self, time : int = 0) -> Tag:
         # this comparison is possible because pythons integers are actually unbounded
         if self._time + time > Tag._UINT64_MAX:
@@ -61,8 +65,6 @@ class Tag:
             return Tag(self._time - 1, Tag._UINT64_MAX)
         return Tag(self._time, self._microstep - 1)
     
-        
-
 assert Tag(time=0, microstep=1) < Tag(time=1, microstep=0)
 assert Tag(time=1, microstep=0) < Tag(time=1, microstep=1)
 assert Tag(1,1) == Tag(1,1)
