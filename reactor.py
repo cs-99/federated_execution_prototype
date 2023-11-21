@@ -88,22 +88,30 @@ class Input(Port, TriggerAction):
         TriggerAction.__init__(self, name, reactor)
         self._released_tag : Tag = Tag(0)
         self._is_connected : bool = False
+        self._delay : Optional[int] = None
 
-    def set_connected(self):
+    def set_connected(self, delay : Optional[int] = None):
         self._is_connected = True
+        self._delay = delay
 
     def _update_released_tag(self, tag : Tag):
         if tag > self._released_tag:
             self._released_tag = tag
-    
+            print(f"SET TAG TO {tag}")
+
     def receive_message(self, tag : Tag):
-        self._reactor.schedule_action_async(self, tag)
+        if self._delay is not None:
+            self._reactor.schedule_action_async(self, tag.delay(self._delay))
+        else:
+            self._reactor.schedule_action_async(self, tag)
         self._update_released_tag(tag)
     
     def receive_tag_only(self, tag : Tag):
         self._update_released_tag(tag)
 
     def acquire_tag(self, tag : Tag, predicate : Callable[[], bool] = lambda: False) -> bool:
+        if self._delay is not None:
+            tag = tag.subtract(self._delay)
         print(f"{self._reactor.name}/{self.name} acquiring {tag}.")
         if tag <= self._released_tag or not self._is_connected:
             return True
@@ -125,6 +133,7 @@ class Output(Port):
     
 # represents a connection from one output to n inputs
 # calls the relevant methods on Inputs and Output
+# TODO: check if any locks are necessary, probably a lock in Input/Output would be best
 class Connection:
     @property 
     def inputs(self) -> List[Input]:
@@ -163,10 +172,10 @@ class CommunicationBus(metaclass=utility.Singleton):
             if input in con.inputs:
                 raise ValueError(f"Input {input.name} already connected to {con.output}")
 
-    def add_connection(self, output, inputs : List[Input]) -> None:
+    def add_connection(self, output, inputs : List[Input], delay = None) -> None:
         for input in inputs:
             self._check_input_already_connected(input)
-            input.set_connected()
+            input.set_connected(delay)
         self._connections.append(Connection(output, inputs)) 
 
     def send(self, output: Output, tag : Tag) -> None:

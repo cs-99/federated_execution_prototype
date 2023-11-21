@@ -79,7 +79,7 @@ def create_cycle_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs : 
                         [],
                         [ReactionDeclaration("on_in", ["in"], ["out"])]
                         ))
-    CommunicationBus().add_connection(reactors[0].get_output("out"), [reactors[1].get_input("in")])
+    CommunicationBus().add_connection(reactors[0].get_output("out"), [reactors[1].get_input("in")], delay=secs_to_ns(0.1))
     CommunicationBus().add_connection(reactors[1].get_output("out"), [reactors[0].get_input("in")])
     return reactors
 
