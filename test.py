@@ -1,8 +1,9 @@
 import random
-from typing import List
+from typing import List, Optional
 from threading import Thread
 
-from reactor import Reactor, ReactionDeclaration, TimerDeclaration, CommunicationBus
+from reactor import Reactor, ReactionDeclaration, TimerDeclaration
+from pubsub import comms
 from tag import Tag
 from utility import secs_to_ns
 
@@ -41,12 +42,19 @@ def create_random_reactor(name : str, start_tag : Tag, stop_tag : Tag) -> Reacto
 
 def run_reactors(reactors : List[Reactor]):
     threads : List[Thread] = []
+    comms_thread = Thread(target=comms.run_all_subscriber_callbacks)
+    comms_thread.start()
     for reactor in reactors:
-        thread = Thread(target=reactor.run)
+        threads.append(Thread(target=reactor.run))
+    for thread in threads:
         thread.start()
-        threads.append(thread)
     for thread in threads:
         thread.join()
+
+def connect(reactor_out : Reactor, output_name : str, reactor_in : Reactor, input_name : str, delay : Optional[int] = None) -> None:
+    topic_name = f"{reactor_out.name}/{output_name}"
+    reactor_out.get_output(output_name).connect(topic_name)
+    reactor_in.get_input(input_name).connect(topic_name, delay)
 
 def create_pub_sub_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs : float = 0.5) -> List[Reactor]:
     reactors = []
@@ -62,7 +70,7 @@ def create_pub_sub_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs 
                         [],
                         [ReactionDeclaration("on_in", ["in"], [])]
                         ))
-    CommunicationBus().add_connection(reactors[0].get_output("out"), [reactors[1].get_input("in")])
+    connect(reactors[0], "out", reactors[1], "in")
     return reactors
 
 def create_cycle_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs : float = 0.5) -> List[Reactor]:
@@ -79,8 +87,8 @@ def create_cycle_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs : 
                         [],
                         [ReactionDeclaration("on_in", ["in"], ["out"])]
                         ))
-    CommunicationBus().add_connection(reactors[0].get_output("out"), [reactors[1].get_input("in")], delay=secs_to_ns(0.1))
-    CommunicationBus().add_connection(reactors[1].get_output("out"), [reactors[0].get_input("in")])
+    connect(reactors[0], "out", reactors[1], "in")
+    connect(reactors[1], "out", reactors[0], "in", secs_to_ns(0.1))
     return reactors
 
 if __name__ == "__main__":

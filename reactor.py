@@ -4,9 +4,10 @@ This is a prototype for the decentralized coordination contract used for federat
 from __future__ import annotations
 from dataclasses import dataclass
 from msilib.schema import RadioButton
-from multiprocessing.connection import Connection
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
 import threading
+from pubsub import Subscriber, Publisher
+
 # custom files from here
 from tag import Tag
 import utility
@@ -80,118 +81,80 @@ class Port(Named, RegisteredReactor):
         RegisteredReactor.__init__(self, reactor)
 
 """
-Input and Output are directly the endpoints for communication
+Input and Output are also the endpoints for communication
 """
+TAG_RELEASE_TOPIC_SUFFIX = "/__tag_release__"
+TAG_REQUEST_TOPIC_SUFFIX = "/__tag_request__"
 class Input(Port, TriggerAction):
     def __init__(self, name, reactor  : Reactor):
         Port.__init__(self, name, reactor)
         TriggerAction.__init__(self, name, reactor)
         self._released_tag : Tag = Tag(0)
         self._is_connected : bool = False
+        self._tag_req_pub : Optional[Publisher] = None
+        self._tag_rel_sub : Optional[Subscriber] = None
+        self._message_sub : Optional[Subscriber] = None
         self._delay : Optional[int] = None
 
-    def set_connected(self, delay : Optional[int] = None):
+    def connect(self, topic_name : str, delay : Optional[int] = None):
+        if self._is_connected:
+            raise ValueError(f"{self._reactor}/{self.name} is already connected.")
+        self._tag_rel_sub = Subscriber(topic_name + TAG_RELEASE_TOPIC_SUFFIX, self._update_released_tag)
+        self._message_sub = Subscriber(topic_name, self._receive_message)
+        self._tag_req_pub = Publisher(topic_name + TAG_REQUEST_TOPIC_SUFFIX)
         self._is_connected = True
         self._delay = delay
 
     def _update_released_tag(self, tag : Tag):
         if tag > self._released_tag:
             self._released_tag = tag
-            print(f"SET TAG TO {tag}")
+            print(self._reactor.name + "/" +repr(self) + " released " + repr(tag))
 
-    def receive_message(self, tag : Tag):
+    def _receive_message(self, tag : Tag):
         if self._delay is not None:
             self._reactor.schedule_action_async(self, tag.delay(self._delay))
         else:
             self._reactor.schedule_action_async(self, tag)
         self._update_released_tag(tag)
-    
-    def receive_tag_only(self, tag : Tag):
-        self._update_released_tag(tag)
 
     def acquire_tag(self, tag : Tag, predicate : Callable[[], bool] = lambda: False) -> bool:
+        tag_to_acquire = tag
         if self._delay is not None:
-            tag = tag.subtract(self._delay)
-        print(f"{self._reactor.name}/{self.name} acquiring {tag}.")
-        if tag <= self._released_tag or not self._is_connected:
+            tag_to_acquire = tag.subtract(self._delay)
+        print(f"{self._reactor.name}/{self.name} acquiring {tag_to_acquire}.")
+        if tag_to_acquire <= self._released_tag or not self._is_connected:
             return True
-        CommunicationBus().send_tag_request(self, tag) # schedule empty event at sender
-        print(f"{self._reactor.name}/{self.name} waiting for tag release {tag}.")
-        return self._reactor.wait_for(lambda: tag <= self._released_tag or predicate())
+        self._tag_req_pub.publish(tag_to_acquire) # schedule empty event at sender
+        print(f"{self._reactor.name}/{self.name} waiting for tag release {tag_to_acquire}.")
+        return self._reactor.wait_for(lambda: (True or print(f"{self._reactor.name}/{self.name} check {self._released_tag}")) and (tag_to_acquire <= self._released_tag or predicate()))
 
 class Output(Port):
     def __init__(self, name, reactor : Reactor):
         super().__init__(name, reactor)
-        reactor.register_release_tag_callback(lambda tag: CommunicationBus().send_tag_only(self, tag))
+        self._is_connected : bool = False
+        self._tag_rel_sub : Optional[Subscriber] = None
+        self._tag_only_pub : Optional[Publisher] = None
+        self._message_pub : Optional[Publisher] = None
+        reactor.register_release_tag_callback(self._send_tag_only)
+    
+    def _send_tag_only(self, tag):
+        if self._is_connected:
+            self._tag_rel_pub.publish(tag)
 
     def set(self, tag : Tag):
-        CommunicationBus().send(self, tag)
+        if self._is_connected:
+            self._message_pub.publish(tag)
 
-    def process_tag_request(self, tag : Tag):
+    def connect(self, topic_name):
+        self._tag_rel_pub = Publisher(topic_name + TAG_RELEASE_TOPIC_SUFFIX)
+        self._tag_req_sub = Subscriber(topic_name + TAG_REQUEST_TOPIC_SUFFIX, self._process_tag_request)
+        self._message_pub = Publisher(topic_name)
+        self._is_connected = True
+    
+    def _process_tag_request(self, tag : Tag):
+        # received a message, therefore must be connected at this point
         if not self._reactor.schedule_empty_async_at(tag): # scheduling failed -> we are at a later tag already
-            CommunicationBus().send_tag_only(self, self._reactor.current_tag)
-    
-# represents a connection from one output to n inputs
-# calls the relevant methods on Inputs and Output
-# TODO: check if any locks are necessary, probably a lock in Input/Output would be best
-class Connection:
-    @property 
-    def inputs(self) -> List[Input]:
-        return self._inputs
-    
-    @property
-    def output(self) -> Output:
-        return self._output
-
-    def __init__(self, output : Output, inputs : List[Input]) -> None:
-        if not isinstance(output, Output):
-            raise ValueError("Connections must have an output.")
-        assert len(inputs) > 0
-        utility.list_instance_check(inputs, Input)
-        self._inputs : List[Input] = inputs
-        self._output : Output = output
-
-    def send_message(self, tag : Tag) -> None:
-        for input in self._inputs:
-            input.receive_message(tag)
-
-    def send_tag_only(self, tag : Tag) -> None:
-        for input in self._inputs:
-            input.receive_tag_only(tag)
-
-    def send_tag_request(self, tag : Tag) -> None:
-        self._output.process_tag_request(tag)
- 
-# singleton that manages all connections
-class CommunicationBus(metaclass=utility.Singleton):
-    def __init__(self):
-        self._connections : List[Connection] = []
-
-    def _check_input_already_connected(self, input : Input):
-        for con in self._connections:
-            if input in con.inputs:
-                raise ValueError(f"Input {input.name} already connected to {con.output}")
-
-    def add_connection(self, output, inputs : List[Input], delay = None) -> None:
-        for input in inputs:
-            self._check_input_already_connected(input)
-            input.set_connected(delay)
-        self._connections.append(Connection(output, inputs)) 
-
-    def send(self, output: Output, tag : Tag) -> None:
-        for connection in self._connections:
-            if connection.output == output:
-                connection.send_message(tag)
-
-    def send_tag_only(self, output: Output, tag : Tag) -> None:
-        for connection in self._connections:
-            if connection.output == output:
-                connection.send_tag_only(tag)
-
-    def send_tag_request(self, input : Input, tag : Tag) -> None:
-        for connection in self._connections:
-            if input in connection.inputs:
-                connection.send_tag_request(tag)
+            self._tag_rel_pub.publish(self._reactor.current_tag)
 
 
 @dataclass
@@ -269,7 +232,7 @@ class ActionList:
         return r
 
 """
-Every Reactor is considered federate, therefore has their own scheduling (see run())
+Every Reactor is considered federate, therefore has their own scheduler (see run())
 """
 class Reactor(Named):
     def __init__(self, name, start_tag, stop_tag, inputs: List[str]=None, outputs: List[str]=None, 
@@ -380,7 +343,7 @@ class Reactor(Named):
         assert isinstance(output, Output)
         return output 
 
-    def get_input(self, name : str) -> Output:
+    def get_input(self, name : str) -> Input:
         input = self._get_port(name)
         assert isinstance(input, Input)
         return input 
@@ -446,6 +409,7 @@ class Reactor(Named):
                     self.wait_for(lambda: bool(self._reaction_q))
 
                 next_tag : Tag = self._reaction_q.next_tag()
+                print(f"{self.name}s next tag is {next_tag}.")
                 refetch_next_tag : bool = False
                 for input in self._inputs:
                     result : bool = input.acquire_tag(next_tag, lambda: self._reaction_q.next_tag() != next_tag)
