@@ -37,7 +37,7 @@ class Action(Named, RegisteredReactor):
         self._function = function
 
     def exec(self, tag : Tag):
-        print(f"Action {self._name} executing at {repr(tag)}.")
+        print(f"Action {self._reactor.name}/{self._name} executing at {tag}.")
         self._function(tag)
 
 @dataclass
@@ -97,16 +97,19 @@ class Input(Port, TriggerAction):
             self._released_tag = tag
     
     def receive_message(self, tag : Tag):
+        self._reactor.schedule_action_async(self, tag)
         self._update_released_tag(tag)
     
     def receive_tag_only(self, tag : Tag):
         self._update_released_tag(tag)
 
-    def acquire_tag(self, tag : Tag, predicate : Callable[[], bool] = lambda: False):
+    def acquire_tag(self, tag : Tag, predicate : Callable[[], bool] = lambda: False) -> bool:
+        print(f"{self._reactor.name}/{self.name} acquiring {tag}.")
         if tag <= self._released_tag or not self._is_connected:
             return True
         CommunicationBus().send_tag_request(self, tag) # schedule empty event at sender
-        self._reactor.wait_for(lambda: tag <= self._released_tag or predicate)
+        print(f"{self._reactor.name}/{self.name} waiting for tag release {tag}.")
+        return self._reactor.wait_for(lambda: tag <= self._released_tag or predicate())
 
 class Output(Port):
     def __init__(self, name, reactor : Reactor):
@@ -149,13 +152,11 @@ class Connection:
 
     def send_tag_request(self, tag : Tag) -> None:
         self._output.process_tag_request(tag)
-
  
 # singleton that manages all connections
 class CommunicationBus(metaclass=utility.Singleton):
     def __init__(self):
         self._connections : List[Connection] = []
-        self._connection_lock : threading.Lock = threading.Lock()
 
     def _check_input_already_connected(self, input : Input):
         for con in self._connections:
@@ -163,29 +164,25 @@ class CommunicationBus(metaclass=utility.Singleton):
                 raise ValueError(f"Input {input.name} already connected to {con.output}")
 
     def add_connection(self, output, inputs : List[Input]) -> None:
-        with self._connection_lock:
-            for input in inputs:
-                self._check_input_already_connected(input)
-                input.set_connected()
-            self._connections.append(Connection(output, inputs)) 
+        for input in inputs:
+            self._check_input_already_connected(input)
+            input.set_connected()
+        self._connections.append(Connection(output, inputs)) 
 
     def send(self, output: Output, tag : Tag) -> None:
-        with self._connection_lock:
-            for connection in self._connections:
-                if connection.output == output:
-                    connection.send_message(tag)
+        for connection in self._connections:
+            if connection.output == output:
+                connection.send_message(tag)
 
     def send_tag_only(self, output: Output, tag : Tag) -> None:
-        with self._connection_lock:
-            for connection in self._connections:
-                if connection.output == output:
-                    connection.send_tag_only(tag)
+        for connection in self._connections:
+            if connection.output == output:
+                connection.send_tag_only(tag)
 
     def send_tag_request(self, input : Input, tag : Tag) -> None:
-        with self._connection_lock:
-            for connection in self._connections:
-                if input in connection.inputs:
-                    connection.send_tag_request(tag)
+        for connection in self._connections:
+            if input in connection.inputs:
+                connection.send_tag_request(tag)
 
 
 @dataclass
@@ -363,14 +360,24 @@ class Reactor(Named):
                 return member
         return None
 
-    @staticmethod
-    def find_port_by_name(ports : List[Port], name : str) -> Optional[Port]:
-        for port in ports:
-            if port.name == name:
-                return port
-        return None
+    def _get_port(self, name : str) -> Port:
+        port = self._find_member_by_name(name)
+        assert port is not None
+        assert isinstance(port, Port)
+        return port
+
+    def get_output(self, name : str) -> Output:
+        output = self._get_port(name)
+        assert isinstance(output, Output)
+        return output 
+
+    def get_input(self, name : str) -> Output:
+        input = self._get_port(name)
+        assert isinstance(input, Input)
+        return input 
 
     def _release_current_tag(self):
+        print(f"{self.name} releasing {self._current_tag}.")
         for callback in self._release_tag_callbacks:
             callback(self._current_tag)
 
@@ -416,8 +423,8 @@ class Reactor(Named):
                 triggered_reactions.append(reaction)
         return triggered_reactions  
 
-    def wait_for(self, predicate):
-        self._reaction_q_cv.wait_for(predicate)
+    def wait_for(self, predicate) -> bool:
+        return self._reaction_q_cv.wait_for(predicate)
 
     def run(self):
         with self._reaction_q_cv:
@@ -435,6 +442,7 @@ class Reactor(Named):
                     result : bool = input.acquire_tag(next_tag, lambda: self._reaction_q.next_tag() != next_tag)
                     if not result or self._reaction_q.next_tag() != next_tag: # acquire_tag failed or actionlist modified
                         refetch_next_tag = True
+                        print(f"{self.name} refetching next tag.")
                         break
                 if refetch_next_tag:
                     continue
@@ -447,11 +455,11 @@ class Reactor(Named):
                     if isinstance(action, TriggerAction):
                         triggered_actions += self._get_triggered_reactions(action)
                 actions += triggered_actions
-                self._release_current_tag()
                 if self._current_tag == self._stop_tag:
                     stop_running = True
             for action in actions:
                 action.exec(self._current_tag)
+            self._release_current_tag()
             if stop_running:
                 return
 
