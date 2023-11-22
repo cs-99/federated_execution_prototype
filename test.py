@@ -45,6 +45,8 @@ def create_random_reactor(name : str, start_tag : Tag, stop_tag : Tag) -> Reacto
 
 def run_reactors(reactors : List[Reactor]):
     threads : List[Thread] = []
+    # Note: this thread is handling the callbacks to subscribers of topics
+    # this is basically what every node in ROS2 would do with rclcpp::spin(), but combined in one thread
     comms_thread = Thread(target=comms.run_all_subscriber_callbacks)
     comms_thread.start()
     for reactor in reactors:
@@ -53,6 +55,7 @@ def run_reactors(reactors : List[Reactor]):
         thread.start()
     for thread in threads:
         thread.join()
+    comms.stop_running_subscriber_callbacks()
 
 def connect(reactor_out : Reactor, output_name : str, reactor_in : Reactor, input_name : str, delay : Optional[int] = None) -> None:
     topic_name = f"{reactor_out.name}/{output_name}"
@@ -99,9 +102,11 @@ if __name__ == "__main__":
     log_handlers : List[logging.Handler] = []
     log_handlers.append(logging.FileHandler("output.log", encoding="ascii", mode="w"))
     log_handlers.append(logging.StreamHandler(sys.stdout))
-    logging.basicConfig(handlers=log_handlers, level=logging.DEBUG)
+    # log level INFO logs only executed actions
+    # log level DEBUG logs some coordination too
+    logging.basicConfig(handlers=log_handlers, level=logging.INFO)
     start_tag = Tag()
-    stop_tag = start_tag.delay(secs_to_ns(10))
+    stop_tag = start_tag.delay(secs_to_ns(1))
     #reactors : List[Reactor] = [create_random_reactor(f"random_reactor{i}", start_tag, stop_tag) for i in range(1)]
     #reactors = create_pub_sub_reactors(start_tag, stop_tag)
     reactors = create_cycle_reactors(start_tag, stop_tag)
@@ -109,6 +114,6 @@ if __name__ == "__main__":
         logging.info(reactor)
     try:
         run_reactors(reactors)
-    except Exception as e:
+    except Exception as e: # this ensures everything gets logged when interrupting the process
         logging.error(e)
         exit()

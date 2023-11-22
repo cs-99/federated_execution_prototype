@@ -1,5 +1,5 @@
 from __future__ import annotations
-from queue import Queue, Empty
+from queue import Queue, Empty # queue is thread safe by default
 from typing import Callable, List, Any, Optional, Union
 import threading
 
@@ -12,6 +12,10 @@ class CommunicationBus(metaclass=utility.Singleton):
     def __init__(self):
         self._topics_lock : threading.Lock = threading.Lock()
         self._topics : List[Topic] = []
+
+        # stuff to signal stopping the subscriber callback thread
+        self._run_subscriber_cbs_lock : threading.Lock = threading.Lock()
+        self._stop_subscriber_cbs : bool = False
 
     def _find_topic(self, topic_name) -> Optional[Topic]:
         with self._topics_lock:
@@ -41,12 +45,23 @@ class CommunicationBus(metaclass=utility.Singleton):
         topic.publish(message)
 
     def run_all_subscriber_callbacks(self):
+        with self._run_subscriber_cbs_lock:
+            self._stop_subscriber_cbs = False
         while True:
             current_topics = []
             with self._topics_lock:
                 current_topics = self._topics.copy()
             for topic in current_topics:
                 topic.run_sub_callbacks()
+            with self._run_subscriber_cbs_lock:
+                if self._stop_subscriber_cbs:
+                    return
+
+    def stop_running_subscriber_callbacks(self):
+        with self._run_subscriber_cbs_lock:
+            self._stop_subscriber_cbs = True
+        
+
 
 comms = CommunicationBus()
 

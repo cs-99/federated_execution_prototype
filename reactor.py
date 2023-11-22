@@ -3,11 +3,10 @@ This is a prototype for the decentralized coordination contract used for federat
 """
 from __future__ import annotations
 from dataclasses import dataclass
-from msilib.schema import RadioButton
 from typing import Callable, List, Optional
 import threading
 from pubsub import Subscriber, Publisher
-import logging
+import logging # thread safe by default
 
 # custom files from here
 from tag import Tag
@@ -39,7 +38,7 @@ class Action(Named, RegisteredReactor):
         self._function = function
 
     def exec(self, tag : Tag):
-        self._reactor.logger.debug(f"{self._name} executing at {tag}.")
+        self._reactor.logger.info(f"{self._name} executing at {tag}.")
         self._function(tag)
 
 @dataclass
@@ -109,7 +108,7 @@ class Input(Port, TriggerAction):
     def _update_released_tag(self, tag : Tag):
         if tag > self._released_tag:
             self._released_tag = tag
-            self._reactor.logger.debug("/" +repr(self) + " released " + repr(tag))
+            self._reactor.logger.debug(repr(self) + " released " + repr(tag))
             self._reactor.notify()
 
     def _receive_message(self, tag : Tag):
@@ -118,14 +117,6 @@ class Input(Port, TriggerAction):
         else:
             self._reactor.schedule_action_async(self, tag)
         self._update_released_tag(tag)
-
-    def _acquire_tag_predicate(self, tag_to_ac : Tag, predicate : Callable[[None], bool]):
-        res = False
-        res = res or tag_to_ac <= self._released_tag
-        self._reactor.logger.debug(f"result of to ac {tag_to_ac} <= rel {self._released_tag} is {res}")
-        res = res or predicate()
-        self._reactor.logger.debug(f"result of predicate is {res}")
-        return res
 
     def acquire_tag(self, tag : Tag, predicate : Callable[[None], bool] = lambda: False) -> bool:
         tag_to_acquire = tag
@@ -136,7 +127,7 @@ class Input(Port, TriggerAction):
             return True
         self._tag_req_pub.publish(tag_to_acquire) # schedule empty event at sender
         self._reactor.logger.debug(f"{self.name} waiting for tag release {tag_to_acquire}.")
-        return self._reactor.wait_for(lambda: self._acquire_tag_predicate(tag_to_acquire, predicate))
+        return self._reactor.wait_for(lambda: tag_to_acquire <= self._released_tag or predicate())
 
 class Output(Port):
     def __init__(self, name, reactor : Reactor):
@@ -414,6 +405,9 @@ class Reactor(Named):
         return self._reaction_q_cv.wait_for(predicate)
 
     def notify(self) -> None:
+        # in python notifying requires holding the lock, this is not the case in cpp
+        # see https://stackoverflow.com/questions/46076186/why-does-python-threading-condition-notify-require-a-lock
+        # TODO: check if it might be a good idea to acquire in the cpp impl too?
         with self._reaction_q_cv:
             self._reaction_q_cv.notify()
 
