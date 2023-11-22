@@ -7,6 +7,7 @@ from msilib.schema import RadioButton
 from typing import Callable, List, Optional
 import threading
 from pubsub import Subscriber, Publisher
+import logging
 
 # custom files from here
 from tag import Tag
@@ -38,7 +39,7 @@ class Action(Named, RegisteredReactor):
         self._function = function
 
     def exec(self, tag : Tag):
-        print(f"Action {self._reactor.name}/{self._name} executing at {tag}.")
+        self._reactor.logger.debug(f"{self._name} executing at {tag}.")
         self._function(tag)
 
 @dataclass
@@ -108,7 +109,8 @@ class Input(Port, TriggerAction):
     def _update_released_tag(self, tag : Tag):
         if tag > self._released_tag:
             self._released_tag = tag
-            print(self._reactor.name + "/" +repr(self) + " released " + repr(tag))
+            self._reactor.logger.debug("/" +repr(self) + " released " + repr(tag))
+            self._reactor.notify()
 
     def _receive_message(self, tag : Tag):
         if self._delay is not None:
@@ -117,16 +119,24 @@ class Input(Port, TriggerAction):
             self._reactor.schedule_action_async(self, tag)
         self._update_released_tag(tag)
 
-    def acquire_tag(self, tag : Tag, predicate : Callable[[], bool] = lambda: False) -> bool:
+    def _acquire_tag_predicate(self, tag_to_ac : Tag, predicate : Callable[[None], bool]):
+        res = False
+        res = res or tag_to_ac <= self._released_tag
+        self._reactor.logger.debug(f"result of to ac {tag_to_ac} <= rel {self._released_tag} is {res}")
+        res = res or predicate()
+        self._reactor.logger.debug(f"result of predicate is {res}")
+        return res
+
+    def acquire_tag(self, tag : Tag, predicate : Callable[[None], bool] = lambda: False) -> bool:
         tag_to_acquire = tag
         if self._delay is not None:
             tag_to_acquire = tag.subtract(self._delay)
-        print(f"{self._reactor.name}/{self.name} acquiring {tag_to_acquire}.")
+        self._reactor.logger.debug(f"{self.name} acquiring {tag_to_acquire}.")
         if tag_to_acquire <= self._released_tag or not self._is_connected:
             return True
         self._tag_req_pub.publish(tag_to_acquire) # schedule empty event at sender
-        print(f"{self._reactor.name}/{self.name} waiting for tag release {tag_to_acquire}.")
-        return self._reactor.wait_for(lambda: (True or print(f"{self._reactor.name}/{self.name} check {self._released_tag}")) and (tag_to_acquire <= self._released_tag or predicate()))
+        self._reactor.logger.debug(f"{self.name} waiting for tag release {tag_to_acquire}.")
+        return self._reactor.wait_for(lambda: self._acquire_tag_predicate(tag_to_acquire, predicate))
 
 class Output(Port):
     def __init__(self, name, reactor : Reactor):
@@ -263,6 +273,8 @@ class Reactor(Named):
         self._reaction_q.add(self._stop_tag, Action("__stop__", self))
         self._reaction_q_lock : threading.Lock = threading.Lock()
         self._reaction_q_cv : threading.Condition = threading.Condition(self._reaction_q_lock)
+
+        self._logger : logging.Logger = logging.getLogger(self._name)
         
     @property
     def start_tag(self) -> Tag:
@@ -275,6 +287,10 @@ class Reactor(Named):
     @property
     def current_tag(self) -> Tag:
         return self._current_tag
+
+    @property
+    def logger(self) -> logging.Logger:
+        return self._logger
 
 
     def _init_reaction(self, reaction : ReactionDeclaration) -> Reaction:
@@ -306,7 +322,6 @@ class Reactor(Named):
         r += f"\n\t Timers: {', '.join(repr(timer) for timer in self._timers)}"
         r += "\n\t Reactions: \n\t\t"
         r += '\n\t\t'.join(repr(reaction) for reaction in self._reactions)
-        
         return r
 
     def register_release_tag_callback(self, callback):
@@ -349,7 +364,7 @@ class Reactor(Named):
         return input 
 
     def _release_current_tag(self):
-        print(f"{self.name} releasing {self._current_tag}.")
+        self.logger.debug(f"releasing {self._current_tag}.")
         for callback in self._release_tag_callbacks:
             callback(self._current_tag)
 
@@ -398,6 +413,10 @@ class Reactor(Named):
     def wait_for(self, predicate) -> bool:
         return self._reaction_q_cv.wait_for(predicate)
 
+    def notify(self) -> None:
+        with self._reaction_q_cv:
+            self._reaction_q_cv.notify()
+
     def run(self):
         with self._reaction_q_cv:
             self._schedule_timers_once()
@@ -409,13 +428,13 @@ class Reactor(Named):
                     self.wait_for(lambda: bool(self._reaction_q))
 
                 next_tag : Tag = self._reaction_q.next_tag()
-                print(f"{self.name}s next tag is {next_tag}.")
+                self.logger.debug(f"next tag is {next_tag}.")
                 refetch_next_tag : bool = False
                 for input in self._inputs:
                     result : bool = input.acquire_tag(next_tag, lambda: self._reaction_q.next_tag() != next_tag)
                     if not result or self._reaction_q.next_tag() != next_tag: # acquire_tag failed or actionlist modified
                         refetch_next_tag = True
-                        print(f"{self.name} refetching next tag.")
+                        self.logger.debug(f"refetching next tag.")
                         break
                 if refetch_next_tag:
                     continue
@@ -430,9 +449,10 @@ class Reactor(Named):
                 actions += triggered_actions
                 if self._current_tag == self._stop_tag:
                     stop_running = True
+                self._release_current_tag()
             for action in actions:
                 action.exec(self._current_tag)
-            self._release_current_tag()
+            
             if stop_running:
                 return
 

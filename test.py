@@ -1,6 +1,9 @@
+from fileinput import filename
 import random
 from typing import List, Optional
 from threading import Thread
+import logging
+import sys
 
 from reactor import Reactor, ReactionDeclaration, TimerDeclaration
 from pubsub import comms
@@ -91,10 +94,21 @@ def create_cycle_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs : 
     connect(reactors[1], "out", reactors[0], "in", secs_to_ns(0.1))
     return reactors
 
+
 if __name__ == "__main__":
+    log_handlers : List[logging.Handler] = []
+    log_handlers.append(logging.FileHandler("output.log", encoding="ascii", mode="w"))
+    log_handlers.append(logging.StreamHandler(sys.stdout))
+    logging.basicConfig(handlers=log_handlers, level=logging.DEBUG)
     start_tag = Tag()
     stop_tag = start_tag.delay(secs_to_ns(10))
     #reactors : List[Reactor] = [create_random_reactor(f"random_reactor{i}", start_tag, stop_tag) for i in range(1)]
     #reactors = create_pub_sub_reactors(start_tag, stop_tag)
     reactors = create_cycle_reactors(start_tag, stop_tag)
-    run_reactors(reactors)
+    for reactor in reactors:
+        logging.info(reactor)
+    try:
+        run_reactors(reactors)
+    except Exception as e:
+        logging.error(e)
+        exit()
