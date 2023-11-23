@@ -40,7 +40,7 @@ class Tag:
         return self > other or self == other
 
     def __repr__(self) -> str:
-        return f"[{datetime.fromtimestamp(self.time/1e9)}, {self.microstep}]"
+        return f"[{self.time}, {self.microstep}]"
 
     def delay(self, time : int = 0) -> Tag:
         # this comparison is possible because pythons integers are actually unbounded

@@ -2,6 +2,7 @@ from __future__ import annotations
 from queue import Queue, Empty # queue is thread safe by default
 from typing import Callable, List, Any, Optional, Union
 import threading
+import logging
 
 import utility
 
@@ -67,6 +68,7 @@ comms = CommunicationBus()
 
 class RegisteredOnTopic:
     def __init__(self, topic_name : str) -> None:
+        logging.debug(topic_name)
         self._topic = comms.register(topic_name, self)
         self._is_registered = True
 

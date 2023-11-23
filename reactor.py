@@ -3,7 +3,7 @@ This is a prototype for the decentralized coordination contract used for federat
 """
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 import threading
 from pubsub import Subscriber, Publisher
 import logging # thread safe by default
@@ -89,73 +89,55 @@ class Input(Port, TriggerAction):
     def __init__(self, name, reactor  : Reactor):
         Port.__init__(self, name, reactor)
         TriggerAction.__init__(self, name, reactor)
-        self._released_tag : Tag = Tag(0)
         self._is_connected : bool = False
-        self._tag_req_pub : Optional[Publisher] = None
-        self._tag_rel_sub : Optional[Subscriber] = None
         self._message_sub : Optional[Subscriber] = None
         self._delay : Optional[int] = None
+        self._connected_reactor_name : Optional[str] = None
 
-    def connect(self, topic_name : str, delay : Optional[int] = None):
+    def connect(self, reactor_name : str, output_name : str,  delay : Optional[int] = None):
         if self._is_connected:
             raise ValueError(f"{self._reactor}/{self.name} is already connected.")
-        self._tag_rel_sub = Subscriber(topic_name + TAG_RELEASE_TOPIC_SUFFIX, self._update_released_tag)
-        self._message_sub = Subscriber(topic_name, self._receive_message)
-        self._tag_req_pub = Publisher(topic_name + TAG_REQUEST_TOPIC_SUFFIX)
+        self._connected_reactor_name = reactor_name
+        self._reactor.ledger.connect_tag_rel_req(reactor_name)
+        self._message_sub = Subscriber(f"{reactor_name}/{output_name}", self._receive_message)
         self._is_connected = True
         self._delay = delay
-
-    def _update_released_tag(self, tag : Tag):
-        if tag > self._released_tag:
-            self._released_tag = tag
-            self._reactor.logger.debug(repr(self) + " released " + repr(tag))
-            self._reactor.notify()
 
     def _receive_message(self, tag : Tag):
         if self._delay is not None:
             self._reactor.schedule_action_async(self, tag.delay(self._delay))
         else:
             self._reactor.schedule_action_async(self, tag)
-        self._update_released_tag(tag)
+        self._reactor.ledger.update_release(self._connected_reactor_name, tag)
+
+    def _acquire_tag_predicate(self, tag_to_acquire : Tag, predicate : Callable[[None], bool]):
+        return tag_to_acquire <= self._reactor.ledger.get_release(self._connected_reactor_name) or predicate()
 
     def acquire_tag(self, tag : Tag, predicate : Callable[[None], bool] = lambda: False) -> bool:
         tag_to_acquire = tag
         if self._delay is not None:
             tag_to_acquire = tag.subtract(self._delay)
         self._reactor.logger.debug(f"{self.name} acquiring {tag_to_acquire}.")
-        if tag_to_acquire <= self._released_tag or not self._is_connected:
+        if tag_to_acquire <= self._reactor.ledger.get_release(self._connected_reactor_name) or not self._is_connected:
             return True
-        self._tag_req_pub.publish(tag_to_acquire) # schedule empty event at sender
+        self._reactor.ledger.request_empty_event_at(self._connected_reactor_name, tag_to_acquire)
         self._reactor.logger.debug(f"{self.name} waiting for tag release {tag_to_acquire}.")
-        return self._reactor.wait_for(lambda: tag_to_acquire <= self._released_tag or predicate())
+        return self._reactor.wait_for(lambda: self._acquire_tag_predicate(tag_to_acquire, predicate))
 
 class Output(Port):
     def __init__(self, name, reactor : Reactor):
         super().__init__(name, reactor)
         self._is_connected : bool = False
-        self._tag_rel_sub : Optional[Subscriber] = None
-        self._tag_only_pub : Optional[Publisher] = None
         self._message_pub : Optional[Publisher] = None
-        reactor.register_release_tag_callback(self._send_tag_only)
-    
-    def _send_tag_only(self, tag):
-        if self._is_connected:
-            self._tag_rel_pub.publish(tag)
 
     def set(self, tag : Tag):
         if self._is_connected:
             self._message_pub.publish(tag)
 
-    def connect(self, topic_name):
-        self._tag_rel_pub = Publisher(topic_name + TAG_RELEASE_TOPIC_SUFFIX)
-        self._tag_req_sub = Subscriber(topic_name + TAG_REQUEST_TOPIC_SUFFIX, self._process_tag_request)
-        self._message_pub = Publisher(topic_name)
+    def connect(self, reactor_name : str):
+        self._reactor.ledger.connect_tag_rel_req(reactor_name)
+        self._message_pub = Publisher(f"{self._reactor.name}/{self._name}")
         self._is_connected = True
-    
-    def _process_tag_request(self, tag : Tag):
-        # received a message, therefore must be connected at this point
-        if not self._reactor.schedule_empty_async_at(tag): # scheduling failed -> we are at a later tag already
-            self._tag_rel_pub.publish(self._reactor.current_tag)
 
 
 @dataclass
@@ -232,6 +214,53 @@ class ActionList:
             r += repr(entry)
         return r
 
+class FederateLedger(RegisteredReactor):
+    def __init__(self, reactor) -> None:
+        super().__init__(reactor)
+        self._released_lock : threading.Lock = threading.Lock()
+        self._released : Dict[str, Tag] = {}
+        #self._reactor.register_release_tag_callback(lambda t: self.update_release(self._reactor.name, t))
+        self._own_release_pub : Publisher = Publisher(self._reactor.name + TAG_RELEASE_TOPIC_SUFFIX)
+        self._own_request_sub : Subscriber = Subscriber(self._reactor.name + TAG_REQUEST_TOPIC_SUFFIX, self._on_tag_reqest)
+        self._reactor.register_release_tag_callback(self._own_release_pub.publish)
+
+        # these are not thread safe as connections are supposed to be drawn before running the reactors
+        self._release_subs : Dict[str, Subscriber] = {}
+        
+        self._request_pubs : Dict[str, Publisher] = {}
+
+    def update_release(self, reactor_name : str, tag : Tag) -> None:
+        with self._released_lock:
+            current = self._released.get(reactor_name)
+            if current is None or tag > current:
+                self._released[reactor_name] = tag
+        self._reactor.notify()
+
+    def get_release(self, reactor_name) -> Tag:
+        with self._released_lock:
+            if reactor_name not in self._released:
+                self._released[reactor_name] = Tag(0,0)
+            return self._released.get(reactor_name)
+
+    def request_empty_event_at(self, reactor_name : str, tag : Tag):
+        assert reactor_name in self._request_pubs
+        self._reactor.logger.debug(f"Requesting empty event at {reactor_name} {tag}")
+        self._request_pubs.get(reactor_name).publish(tag)
+
+    def _on_tag_reqest(self, tag: Tag):
+        if not self._reactor.schedule_empty_async_at(tag): # scheduling failed -> we are at a later tag already
+            pass
+            # one could resend the current tag here, but assuming that messages are delivered reliably it is not necessary
+            # self._own_release_pub.publish(self._reactor.current_tag)
+
+    def connect_tag_rel_req(self, reactor_name):
+        if reactor_name in self._release_subs:
+            return
+        self._release_subs[reactor_name] = Subscriber(reactor_name + TAG_RELEASE_TOPIC_SUFFIX, (lambda n: lambda t: self.update_release(n, t))(reactor_name))
+        self._request_pubs[reactor_name] = Publisher(reactor_name + TAG_REQUEST_TOPIC_SUFFIX)
+
+    
+
 """
 Every Reactor is considered federate, therefore has their own scheduler (see run())
 """
@@ -264,6 +293,7 @@ class Reactor(Named):
         self._reaction_q.add(self._stop_tag, Action("__stop__", self))
         self._reaction_q_lock : threading.Lock = threading.Lock()
         self._reaction_q_cv : threading.Condition = threading.Condition(self._reaction_q_lock)
+        self._ledger : FederateLedger = FederateLedger(self)
 
         self._logger : logging.Logger = logging.getLogger(self._name)
         
@@ -282,6 +312,10 @@ class Reactor(Named):
     @property
     def logger(self) -> logging.Logger:
         return self._logger
+
+    @property
+    def ledger(self) -> FederateLedger:
+        return self._ledger
 
 
     def _init_reaction(self, reaction : ReactionDeclaration) -> Reaction:
@@ -354,8 +388,8 @@ class Reactor(Named):
         assert isinstance(input, Input)
         return input 
 
-    def _release_current_tag(self):
-        self.logger.debug(f"releasing {self._current_tag}.")
+    def _release_tag(self, tag : Tag):
+        self.logger.debug(f"releasing {tag}.")
         for callback in self._release_tag_callbacks:
             callback(self._current_tag)
 
@@ -414,6 +448,8 @@ class Reactor(Named):
     def run(self):
         with self._reaction_q_cv:
             self._schedule_timers_once()
+        # releasing the tag directly before the start tag here
+        self._release_tag(self._current_tag)
         stop_running : bool = False
         while True:
             actions = []
@@ -443,7 +479,7 @@ class Reactor(Named):
                 actions += triggered_actions
                 if self._current_tag == self._stop_tag:
                     stop_running = True
-                self._release_current_tag()
+                self._release_tag(self._current_tag)
             for action in actions:
                 action.exec(self._current_tag)
             

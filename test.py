@@ -58,9 +58,8 @@ def run_reactors(reactors : List[Reactor]):
     comms.stop_running_subscriber_callbacks()
 
 def connect(reactor_out : Reactor, output_name : str, reactor_in : Reactor, input_name : str, delay : Optional[int] = None) -> None:
-    topic_name = f"{reactor_out.name}/{output_name}"
-    reactor_out.get_output(output_name).connect(topic_name)
-    reactor_in.get_input(input_name).connect(topic_name, delay)
+    reactor_out.get_output(output_name).connect(reactor_in.name)
+    reactor_in.get_input(input_name).connect(reactor_out.name, output_name, delay)
 
 def create_pub_sub_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs : float = 0.5) -> List[Reactor]:
     reactors = []
