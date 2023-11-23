@@ -79,7 +79,7 @@ def create_pub_sub_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs 
     connect(reactors[0], "out", reactors[1], "in")
     return reactors
 
-def create_cycle_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs : float = 0.5) -> List[Reactor]:
+def create_cycle_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs : float = 0.5, delay : float = 0.01) -> List[Reactor]:
     reactors = []
     reactors.append(Reactor("pub", start_tag, stop_tag, 
                         ["in"], 
@@ -94,7 +94,36 @@ def create_cycle_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs : 
                         [ReactionDeclaration("on_in", ["in"], ["out"])]
                         ))
     connect(reactors[0], "out", reactors[1], "in")
-    connect(reactors[1], "out", reactors[0], "in", secs_to_ns(0.1))
+    connect(reactors[1], "out", reactors[0], "in", secs_to_ns(delay))
+    return reactors
+
+def create_double_cycle_reactors(start_tag : Tag, stop_tag : Tag, 
+        message_every_secs_1 : float = 0.5, delay_1 : float = 0.1,
+        message_every_secs_2 : float = 0.5, delay_2 : float = 0.1) -> List[Reactor]:
+    reactors = []
+    reactors.append(Reactor("a", start_tag, stop_tag, 
+                        ["in"], 
+                        ["out"], 
+                        [TimerDeclaration("timer", secs_to_ns(0), secs_to_ns(message_every_secs_1))],
+                        [ReactionDeclaration("on_timer", ["timer"], ["out"]), ReactionDeclaration("on_in", ["in"], [])]
+                        ))
+    reactors.append(Reactor("b", start_tag, stop_tag, 
+                        ["in_c", "in_a"], 
+                        ["out_c", "out_a"], 
+                        [],
+                        [ReactionDeclaration("on_in_a", ["in_a"], ["out_a"]),
+                        ReactionDeclaration("on_in_c", ["in_c"], ["out_c"])]
+                        ))
+    reactors.append(Reactor("c", start_tag, stop_tag, 
+                        ["in"], 
+                        ["out"], 
+                        [TimerDeclaration("timer", secs_to_ns(0), secs_to_ns(message_every_secs_2))],
+                        [ReactionDeclaration("on_timer", ["timer"], ["out"]), ReactionDeclaration("on_in", ["in"], [])]
+                        ))
+    connect(reactors[0], "out", reactors[1], "in_a")
+    connect(reactors[1], "out_a", reactors[0], "in", secs_to_ns(delay_1))
+    connect(reactors[2], "out", reactors[1], "in_c")
+    connect(reactors[1], "out_c", reactors[2], "in", secs_to_ns(delay_2))
     return reactors
 
 
@@ -109,7 +138,8 @@ if __name__ == "__main__":
     stop_tag = start_tag.delay(secs_to_ns(1))
     #reactors : List[Reactor] = [create_random_reactor(f"random_reactor{i}", start_tag, stop_tag) for i in range(1)]
     #reactors = create_pub_sub_reactors(start_tag, stop_tag)
-    reactors = create_cycle_reactors(start_tag, stop_tag)
+    #reactors = create_cycle_reactors(start_tag, stop_tag)
+    reactors = create_double_cycle_reactors(start_tag, stop_tag, delay_1=0.01)
     for reactor in reactors:
         logging.info(reactor)
     try:
