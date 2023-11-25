@@ -108,7 +108,8 @@ class Input(Port, TriggerAction):
             self._reactor.schedule_action_async(self, tag.delay(self._delay))
         else:
             self._reactor.schedule_action_async(self, tag)
-        self._reactor.ledger.update_release(self._connected_reactor_name, tag)
+        # not necessary as a release tag message will be sent on release
+        #self._reactor.ledger.update_release(self._connected_reactor_name, tag)
 
     def _acquire_tag_predicate(self, tag_to_acquire : Tag, predicate : Callable[[None], bool]):
         return tag_to_acquire <= self._reactor.ledger.get_release(self._connected_reactor_name) or predicate()
@@ -118,7 +119,9 @@ class Input(Port, TriggerAction):
         if self._delay is not None:
             tag_to_acquire = tag.subtract(self._delay)
         self._reactor.logger.debug(f"{self.name} acquiring {tag_to_acquire}.")
-        if tag_to_acquire <= self._reactor.ledger.get_release(self._connected_reactor_name) or not self._is_connected:
+        if tag_to_acquire <= self._reactor.ledger.get_release(self._connected_reactor_name) \
+            or tag_to_acquire <= self._reactor.ledger.get_requested(self._connected_reactor_name) \
+            or not self._is_connected:
             return True
         self._reactor.ledger.request_empty_event_at(self._connected_reactor_name, tag_to_acquire)
         self._reactor.logger.debug(f"{self.name} waiting for tag release {tag_to_acquire}.")
@@ -214,11 +217,20 @@ class ActionList:
             r += repr(entry)
         return r
 
+@dataclass
+class TagRequest:
+    name: str
+    tag : Tag
+    previous : Dict[str, Tag]
+
 class FederateLedger(RegisteredReactor):
     def __init__(self, reactor) -> None:
         super().__init__(reactor)
         self._released_lock : threading.Lock = threading.Lock()
         self._released : Dict[str, Tag] = {}
+
+        # since this Dict is only accessed by the (one) thread calling the callbacks, no lock needed rn
+        self._requested : Dict[str, Tag] = {}
         #self._reactor.register_release_tag_callback(lambda t: self.update_release(self._reactor.name, t))
         self._own_release_pub : Publisher = Publisher(self._reactor.name + TAG_RELEASE_TOPIC_SUFFIX)
         self._own_request_sub : Subscriber = Subscriber(self._reactor.name + TAG_REQUEST_TOPIC_SUFFIX, self._on_tag_reqest)
@@ -226,7 +238,6 @@ class FederateLedger(RegisteredReactor):
 
         # these are not thread safe as connections are supposed to be drawn before running the reactors
         self._release_subs : Dict[str, Subscriber] = {}
-        
         self._request_pubs : Dict[str, Publisher] = {}
 
     def update_release(self, reactor_name : str, tag : Tag) -> None:
@@ -242,13 +253,28 @@ class FederateLedger(RegisteredReactor):
                 self._released[reactor_name] = Tag(0,0)
             return self._released.get(reactor_name)
 
+    def get_requested(self, reactor_name) -> Tag:
+        if reactor_name not in self._requested:
+            self._requested[reactor_name] = Tag(0,0)
+        return self._requested.get(reactor_name)
+
+
     def request_empty_event_at(self, reactor_name : str, tag : Tag):
         assert reactor_name in self._request_pubs
         self._reactor.logger.debug(f"Requesting empty event at {reactor_name} {tag}")
-        self._request_pubs.get(reactor_name).publish(tag)
+        self._request_pubs.get(reactor_name).publish(TagRequest(self._reactor.name, tag, self._requested))
 
-    def _on_tag_reqest(self, tag: Tag):
-        if not self._reactor.schedule_empty_async_at(tag): # scheduling failed -> we are at a later tag already
+    def _update_requested(self, name : str, tag : Tag):
+        if name not in self._requested or self._requested.get(name) < tag:
+            self._requested[name] = tag
+
+    def _on_tag_reqest(self, request: TagRequest):
+        self._update_requested(request.name, request.tag)
+        for name, tag in request.previous.items():
+            self._update_requested(name, tag)
+        if self._reactor.schedule_empty_async_at(request.tag): 
+            pass
+        else: # scheduling failed -> we are at a later tag already
             pass
             # one could resend the current tag here, but assuming that messages are delivered reliably it is not necessary
             # self._own_release_pub.publish(self._reactor.current_tag)
