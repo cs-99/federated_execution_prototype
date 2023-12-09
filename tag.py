@@ -1,6 +1,6 @@
 from __future__ import annotations
 from time import time_ns
-from datetime import datetime
+
 
 class Tag:
     _UINT64_MAX : int = 18446744073709551615
@@ -68,3 +68,20 @@ class Tag:
 assert Tag(time=0, microstep=1) < Tag(time=1, microstep=0)
 assert Tag(time=1, microstep=0) < Tag(time=1, microstep=1)
 assert Tag(1,1) == Tag(1,1)
+assert Tag(1,1) != Tag(1,2)
+assert Tag(1,1) != Tag(2,1)
+assert Tag(1,1) < Tag(2,1)
+assert Tag(1,1) < Tag(1,2)
+assert Tag(1,1) > Tag(0,1)
+assert Tag(1,1) > Tag(1,0)
+assert Tag(1,1) <= Tag(1,1)
+assert Tag(1,1) >= Tag(1,1)
+assert Tag(1,1) <= Tag(2,1)
+assert Tag(1,1) >= Tag(0,1)
+assert Tag(1,1) <= Tag(1,2)
+assert Tag(1,1) >= Tag(1,0)
+assert Tag(1,1).delay() == Tag(1,2)
+assert Tag(1,1).delay(1) == Tag(2,0)
+assert Tag(1,1).delay(2) == Tag(3,0)
+assert Tag(1,1).subtract() == Tag(1,0)
+assert Tag(1,1).subtract(1) == Tag(0,Tag._UINT64_MAX)

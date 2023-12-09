@@ -120,7 +120,6 @@ class Input(Port, TriggerAction):
             tag_to_acquire = tag.subtract(self._delay)
         self._reactor.logger.debug(f"{self.name} acquiring {tag_to_acquire}.")
         if tag_to_acquire <= self._reactor.ledger.get_release(self._connected_reactor_name) \
-            or tag_to_acquire <= self._reactor.ledger.get_requested(self._connected_reactor_name) \
             or not self._is_connected:
             return True
         self._reactor.ledger.request_empty_event_at(self._connected_reactor_name, tag_to_acquire)
@@ -142,18 +141,16 @@ class Output(Port):
         self._message_pub = Publisher(f"{self._reactor.name}/{self._name}")
         self._is_connected = True
 
-
 @dataclass
 class ReactionDeclaration:
     name: str
     triggers: List[str]
     effects: List[str]
-
         
 class Reaction(Action):
     def __init__(self, name, reactor, triggers=None, effects=None):
         super().__init__(name, reactor)
-        self._triggers : List[Input] = triggers if triggers is not None else []
+        self._triggers : List[TriggerAction] = triggers if triggers is not None else []
         self._effects : List[Output] = effects if effects is not None else []
         utility.list_instance_check(self._triggers, TriggerAction)
         utility.list_instance_check(self._effects, Output)
@@ -170,13 +167,12 @@ class Reaction(Action):
         return r
 
     @property
-    def triggers(self) -> List[Input]:
+    def triggers(self) -> List[TriggerAction]:
         return self._triggers
 
     @property
     def effects(self) -> List[Output]:
         return self._effects
-
 
 @dataclass
 class ActionListEntry:
@@ -187,7 +183,7 @@ class ActionList:
     def __init__(self) -> None:
         self._list : List[ActionListEntry] = []
 
-    def add(self, tag : Tag, action : Action) -> None:
+    def add(self, tag: Tag, action: Action) -> None:
         for entry in self._list:
             if entry.tag == tag:
                 entry.actions.append(action)
@@ -196,17 +192,14 @@ class ActionList:
 
     def pop_tag(self, tag: Tag) -> List[Action]:
         assert len(self._list) > 0
-        actions = list(filter(lambda e: e.tag == self.next_tag(), self._list))[0].actions
-        self._list = list(filter(lambda e: e.tag != self.next_tag(), self._list))
+        assert any(entry.tag == tag for entry in self._list), f"Tag {tag} not found in the list"
+        actions = [entry.actions for entry in self._list if entry.tag == tag][0]
+        self._list = [entry for entry in self._list if entry.tag != tag]
         return actions
     
     def next_tag(self) -> Tag:
         assert len(self._list) > 0
-        smallest_tag : Tag = self._list[0].tag
-        for entry in self._list:
-            if entry.tag < smallest_tag:
-                smallest_tag = entry.tag 
-        return smallest_tag
+        return min(entry.tag for entry in self._list)
         
     def __bool__(self) -> bool:
         return bool(self._list)
@@ -217,20 +210,12 @@ class ActionList:
             r += repr(entry)
         return r
 
-@dataclass
-class TagRequest:
-    name: str
-    tag : Tag
-    previous : Dict[str, Tag]
-
 class FederateLedger(RegisteredReactor):
     def __init__(self, reactor) -> None:
         super().__init__(reactor)
         self._released_lock : threading.Lock = threading.Lock()
         self._released : Dict[str, Tag] = {}
 
-        # since this Dict is only accessed by the (one) thread calling the callbacks, no lock needed rn
-        self._requested : Dict[str, Tag] = {}
         #self._reactor.register_release_tag_callback(lambda t: self.update_release(self._reactor.name, t))
         self._own_release_pub : Publisher = Publisher(self._reactor.name + TAG_RELEASE_TOPIC_SUFFIX)
         self._own_request_sub : Subscriber = Subscriber(self._reactor.name + TAG_REQUEST_TOPIC_SUFFIX, self._on_tag_reqest)
@@ -240,7 +225,7 @@ class FederateLedger(RegisteredReactor):
         self._release_subs : Dict[str, Subscriber] = {}
         self._request_pubs : Dict[str, Publisher] = {}
 
-    def update_release(self, reactor_name : str, tag : Tag) -> None:
+    def update_release(self, reactor_name: str, tag: Tag) -> None:
         with self._released_lock:
             current = self._released.get(reactor_name)
             if current is None or tag > current:
@@ -249,30 +234,15 @@ class FederateLedger(RegisteredReactor):
 
     def get_release(self, reactor_name) -> Tag:
         with self._released_lock:
-            if reactor_name not in self._released:
-                self._released[reactor_name] = Tag(0,0)
-            return self._released.get(reactor_name)
-
-    def get_requested(self, reactor_name) -> Tag:
-        if reactor_name not in self._requested:
-            self._requested[reactor_name] = Tag(0,0)
-        return self._requested.get(reactor_name)
-
+            return self._released.setdefault(reactor_name, Tag(0, 0))
 
     def request_empty_event_at(self, reactor_name : str, tag : Tag):
         assert reactor_name in self._request_pubs
         self._reactor.logger.debug(f"Requesting empty event at {reactor_name} {tag}")
-        self._request_pubs.get(reactor_name).publish(TagRequest(self._reactor.name, tag, self._requested))
+        self._request_pubs.get(reactor_name).publish(tag)
 
-    def _update_requested(self, name : str, tag : Tag):
-        if name not in self._requested or self._requested.get(name) < tag:
-            self._requested[name] = tag
-
-    def _on_tag_reqest(self, request: TagRequest):
-        self._update_requested(request.name, request.tag)
-        for name, tag in request.previous.items():
-            self._update_requested(name, tag)
-        if self._reactor.schedule_empty_async_at(request.tag): 
+    def _on_tag_reqest(self, tag : Tag):
+        if self._reactor.schedule_empty_async_at(tag): 
             pass
         else: # scheduling failed -> we are at a later tag already
             pass
@@ -286,7 +256,6 @@ class FederateLedger(RegisteredReactor):
         self._request_pubs[reactor_name] = Publisher(reactor_name + TAG_REQUEST_TOPIC_SUFFIX)
 
     
-
 """
 Every Reactor is considered federate, therefore has their own scheduler (see run())
 """
@@ -343,21 +312,14 @@ class Reactor(Named):
     def ledger(self) -> FederateLedger:
         return self._ledger
 
+    def _init_reaction(self, reaction: ReactionDeclaration) -> Reaction:
+        triggers = [self._find_member_by_name(trigger_name) for trigger_name in reaction.triggers]
+        if any(trigger is None or not isinstance(trigger, TriggerAction) for trigger in triggers):
+            raise ValueError(f"One or more triggers not found in {self.name}.")
 
-    def _init_reaction(self, reaction : ReactionDeclaration) -> Reaction:
-        triggers = []
-        for trigger_name in reaction.triggers:
-            trigger = self._find_member_by_name(trigger_name)
-            if trigger is None or not isinstance(trigger, TriggerAction):
-                raise ValueError(f"Trigger {trigger_name} not in {self.name}.")
-            triggers.append(trigger)
-
-        effects = []
-        for output_name in reaction.effects:
-            output = self._find_member_by_name(output_name)
-            if output is None or not isinstance(output, Output):
-                raise ValueError(f"Output {output_name} not in {self.name}.")
-            effects.append(output)
+        effects = [self._find_member_by_name(output_name) for output_name in reaction.effects]
+        if any(effect is None or not isinstance(effect, Output) for effect in effects):
+            raise ValueError(f"One or more effects not found in {self.name}.")
 
         return Reaction(reaction.name, self, triggers, effects)
 
@@ -454,12 +416,8 @@ class Reactor(Named):
         for timer in self._timers:
             timer.schedule_start()
 
-    def _get_triggered_reactions(self, action : TriggerAction):
-        triggered_reactions : List[Reaction] = []
-        for reaction in self._reactions:
-            if action in reaction.triggers:
-                triggered_reactions.append(reaction)
-        return triggered_reactions  
+    def _get_triggered_reactions(self, action: TriggerAction) -> List[Reaction]:
+        return [reaction for reaction in self._reactions if action in reaction.triggers]
 
     def wait_for(self, predicate) -> bool:
         return self._reaction_q_cv.wait_for(predicate)
@@ -498,10 +456,7 @@ class Reactor(Named):
                 self._current_tag = next_tag
                 actions = self._reaction_q.pop_tag(self._current_tag)
 
-                triggered_actions = []
-                for action in actions:
-                    if isinstance(action, TriggerAction):
-                        triggered_actions += self._get_triggered_reactions(action)
+                triggered_actions = [reaction for action in actions if isinstance(action, TriggerAction) for reaction in self._get_triggered_reactions(action)]
                 actions += triggered_actions
                 if self._current_tag == self._stop_tag:
                     stop_running = True

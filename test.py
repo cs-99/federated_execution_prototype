@@ -154,12 +154,14 @@ def create_deep_loop(start_tag : Tag, stop_tag : Tag, message_every_secs : float
 
 
 if __name__ == "__main__":
-    log_handlers : List[logging.Handler] = []
-    log_handlers.append(logging.FileHandler("output.log", encoding="ascii", mode="w"))
-    log_handlers.append(logging.StreamHandler(sys.stdout))
+    log_handlers : List[logging.Handler] = [
+        logging.FileHandler("output.log", encoding="ascii", mode="w"),
+        logging.StreamHandler(sys.stdout)
+    ]
     # log level INFO logs only executed actions
     # log level DEBUG logs some coordination too
     logging.basicConfig(handlers=log_handlers, level=logging.INFO)
+
     start_tag = Tag()
     stop_tag = start_tag.delay(secs_to_ns(1))
     #reactors : List[Reactor] = [create_random_reactor(f"random_reactor{i}", start_tag, stop_tag) for i in range(1)]

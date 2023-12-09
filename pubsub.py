@@ -62,8 +62,6 @@ class CommunicationBus(metaclass=utility.Singleton):
         with self._run_subscriber_cbs_lock:
             self._stop_subscriber_cbs = True
         
-
-
 comms = CommunicationBus()
 
 class RegisteredOnTopic:
@@ -145,6 +143,3 @@ class Topic:
             subs = self._subscribers.copy()
         for sub in subs:
             sub.process_next_message()
-
-
-    

@@ -1,5 +1,4 @@
 from __future__ import annotations
-import threading
 from typing import List
 
 class Singleton(type):
@@ -15,10 +14,10 @@ def list_instance_check(list, type) -> None:
         if not isinstance(elem, type):
             raise TypeError("List contains elements that are not of type " + type)
 
-def secs_to_ns(time) -> int:
-    return int(time * 1000000000)
+def secs_to_ns(secs: float) -> int:
+    return int(secs * 1000000000)
 
-def ns_to_secs(time) -> float:
-    return time / 1000000000
+def ns_to_secs(ns: int) -> float:
+    return ns / 1000000000
 
 
