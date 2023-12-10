@@ -97,19 +97,47 @@ def create_cycle_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs : 
     connect(reactors[1], "out", reactors[0], "in", secs_to_ns(0.1))
     return reactors
 
+def create_deep_loop(start_tag : Tag, stop_tag : Tag, message_every_secs : float = 0.5):
+    reactors = []
+    reactors.append(Reactor("a", start_tag, stop_tag, ["in"], ["out"],
+                    [TimerDeclaration("t", 0, secs_to_ns(message_every_secs))],
+                    [ReactionDeclaration("r", ["t"], ["out"])],
+                    ))
+    reactors.append(Reactor("b", start_tag, stop_tag, ["in"], ["out"],
+                    [],
+                    [ReactionDeclaration("r", ["in"], ["out"])],
+                    ))
+    reactors.append(Reactor("c", start_tag, stop_tag, ["in"], ["out"],
+                    [],
+                    [ReactionDeclaration("r", ["in"], ["out"])],
+                    ))
+    reactors.append(Reactor("d", start_tag, stop_tag, ["in"], ["out"],
+                    [],
+                    [ReactionDeclaration("r", ["in"], ["out"])],
+                    ))
+    connect(reactors[0], "out", reactors[1], "in")
+    connect(reactors[1], "out", reactors[2], "in")
+    connect(reactors[2], "out", reactors[3], "in")
+    connect(reactors[3], "out", reactors[0], "in", secs_to_ns(0.3))
+    return reactors
+
 
 if __name__ == "__main__":
-    log_handlers : List[logging.Handler] = []
-    log_handlers.append(logging.FileHandler("output.log", encoding="ascii", mode="w"))
-    log_handlers.append(logging.StreamHandler(sys.stdout))
+    log_handlers : List[logging.Handler] = [
+        logging.FileHandler("output.log", encoding="ascii", mode="w"),
+        logging.StreamHandler(sys.stdout)
+    ]
     # log level INFO logs only executed actions
     # log level DEBUG logs some coordination too
     logging.basicConfig(handlers=log_handlers, level=logging.INFO)
-    start_tag = Tag()
-    stop_tag = start_tag.delay(secs_to_ns(1))
+
+    # start at tag 1000 sec for better readability
+    start_tag = Tag(secs_to_ns(1000)) 
+    stop_tag = start_tag.delay(secs_to_ns(5))
     #reactors : List[Reactor] = [create_random_reactor(f"random_reactor{i}", start_tag, stop_tag) for i in range(1)]
     #reactors = create_pub_sub_reactors(start_tag, stop_tag)
-    reactors = create_cycle_reactors(start_tag, stop_tag)
+    #reactors = create_cycle_reactors(start_tag, stop_tag)
+    reactors = create_deep_loop(start_tag, stop_tag)
     for reactor in reactors:
         logging.info(reactor)
     try:
