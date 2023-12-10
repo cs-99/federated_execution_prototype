@@ -1,5 +1,4 @@
 from __future__ import annotations
-from queue import Queue, Empty # queue is thread safe by default
 from typing import Callable, List, Any, Optional, Union
 import threading
 import logging
@@ -86,28 +85,25 @@ class Publisher(RegisteredOnTopic):
 
 class Subscriber(RegisteredOnTopic):
     def __init__(self, topic_name : str, callback : Callable[[Any], None]) -> None:
-        # Queue is thread safe by default
-        self._queue : Queue = Queue()
+        self._next_message_history_index : int = 0
         assert isinstance(callback, Callable)
         self._callback = callback
         super().__init__(topic_name)
 
-    def insert_message(self, message : Any) -> None:
-        assert self._is_registered
-        self._queue.put(message)
-
     def process_next_message(self):
         assert self._is_registered
-        try:
-            self._callback(self._queue.get_nowait())
-        except Empty:
-            pass
+        history = self._topic.get_history()
+        if self._next_message_history_index == len(history):
+            return
+        self._callback(history[self._next_message_history_index])
+        self._next_message_history_index += 1
 
 class Topic:
     def __init__(self, name : str):
         self._name : str = name
         self._publishers : List[Publisher] = []
         self._subscribers : List[Subscriber] = []
+        self._message_history : List[Any] = []
         self._topic_lock : threading.Lock = threading.Lock()
 
     @property
@@ -134,8 +130,11 @@ class Topic:
     
     def publish(self, message : Any):
         with self._topic_lock:
-            for sub in self._subscribers:
-                sub.insert_message(message)
+            self._message_history.append(message)
+
+    def get_history(self):
+        with self._topic_lock:
+            return self._message_history.copy()
 
     def run_sub_callbacks(self):
         subs = []
