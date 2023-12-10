@@ -322,7 +322,7 @@ class FederateLedger(RegisteredReactor):
 
         self._loop_acquire_request_sub : Subscriber = Subscriber(self._reactor.name + LOOP_ACQUIRE_REQUEST_TOPIC_SUFFIX, self._on_loop_acquire_request)
         self._loop_acquire_success_pub : Publisher = Publisher(self._reactor.name + LOOP_ACQUIRE_SUCCESS_TOPIC_SUFFIX)
-        # i dont think these need to be protected by some lock, TODO: check
+        # these are protected by loop_member_lock too
         self._loop_acquire_request_pubs : Dict[str, Publisher] = {}
         self._loop_acquire_success_subs : Dict[str, Subscriber] = {}
         self._loop_acquired : Dict[str, Tag] = {}
@@ -340,14 +340,12 @@ class FederateLedger(RegisteredReactor):
         self._reactor.schedule_loop_acquire(tag, reactor_name)
     
     def is_part_of_same_loops(self, reactor_name: str, loop_acquire_origins: set[str]) -> bool:
-        loop_members = set()
         with self._loop_member_lock:
-            loop_members = self._loop_members.copy()
-        for loop in loop_members:
-            if reactor_name in loop:
-                for origin in loop_acquire_origins:
-                    if origin in loop:
-                        return True
+            for loop in self._loop_members:
+                if reactor_name in loop:
+                    for origin in loop_acquire_origins:
+                        if origin in loop:
+                            return True
         return False
 
     def loop_acquire_success(self, tag: Tag, loop_acquire_origins: set[str]) -> None:
@@ -355,34 +353,31 @@ class FederateLedger(RegisteredReactor):
             self._loop_acquire_success_pub.publish((origin, tag))
     
     def loop_acquire_request(self, reactor_name: str, tag: Tag) -> None:
-        loop_members = set()
         with self._loop_member_lock:
-            loop_members = self._loop_members.copy()
-        for loop in loop_members:
-            if reactor_name in loop:
-                for member in loop:
-                    if member != self._reactor.name:
-                        self._loop_acquire_request_pubs[member].publish((self._reactor.name, tag))
+            for loop in self._loop_members:
+                if reactor_name in loop:
+                    for member in loop:
+                        if member != self._reactor.name:
+                            self._loop_acquire_request_pubs[member].publish((self._reactor.name, tag))
 
     def _on_loop_acquire_success(self, member : str,  success: Tuple[str, Tag]):
         if success[0] != self._reactor.name:
             return
-        if self._loop_acquired.get(member) is None or success[1] > self._loop_acquired[member]:
-            self._loop_acquired[member] = success[1]
+        with self._loop_member_lock:
+            if self._loop_acquired.get(member) is None or success[1] > self._loop_acquired[member]:
+                self._loop_acquired[member] = success[1]
         self._reactor.notify()
 
     def check_loops_acquired(self, loop_member, tag: Tag) -> bool:
-        loop_members = set()
-        with self._loop_member_lock:
-            loop_members = self._loop_members.copy()
         found = False # if member is not part of a known loop we return False
-        for loop in loop_members:
-            if loop_member in loop:
-                found = True
-                for member in loop:
-                    if member != self._reactor.name:
-                        if member not in self._loop_acquired or self._loop_acquired[member] < tag:
-                            return False
+        with self._loop_member_lock:
+            for loop in self._loop_members:
+                if loop_member in loop:
+                    found = True
+                    for member in loop:
+                        if member != self._reactor.name:
+                            if member not in self._loop_acquired or self._loop_acquired[member] < tag:
+                                return False
         return found
     
     def is_loop_member(self, reactor_name: str) -> bool:
