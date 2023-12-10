@@ -147,10 +147,8 @@ def create_deep_loop(start_tag : Tag, stop_tag : Tag, message_every_secs : float
     connect(reactors[0], "out", reactors[1], "in")
     connect(reactors[1], "out", reactors[2], "in")
     connect(reactors[2], "out", reactors[3], "in")
-    connect(reactors[3], "out", reactors[0], "in", secs_to_ns(0.01))
+    connect(reactors[3], "out", reactors[0], "in", secs_to_ns(0.3))
     return reactors
-    
-
 
 
 if __name__ == "__main__":
@@ -160,7 +158,7 @@ if __name__ == "__main__":
     ]
     # log level INFO logs only executed actions
     # log level DEBUG logs some coordination too
-    logging.basicConfig(handlers=log_handlers, level=logging.INFO)
+    logging.basicConfig(handlers=log_handlers, level=logging.DEBUG)
 
     start_tag = Tag()
     stop_tag = start_tag.delay(secs_to_ns(1))

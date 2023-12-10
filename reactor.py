@@ -85,12 +85,16 @@ Input and Output are also the endpoints for communication
 """
 TAG_RELEASE_TOPIC_SUFFIX = "/__tag_release__"
 TAG_REQUEST_TOPIC_SUFFIX = "/__tag_request__"
+LOOP_DISCOVERY_TOPIC_SUFFIX = "/__loop_discovery__"
+LOOP_DETECTED_TOPIC_SUFFIX = "/__loop_detected__" # after a loop is detected, this topic is used to notify the other federates
 class Input(Port, TriggerAction):
     def __init__(self, name, reactor  : Reactor):
         Port.__init__(self, name, reactor)
         TriggerAction.__init__(self, name, reactor)
         self._is_connected : bool = False
         self._message_sub : Optional[Subscriber] = None
+        self._loop_discovery_sub: Optional[Subscriber] = None
+        self._loop_detected_sub : Optional[Subscriber] = None
         self._delay : Optional[int] = None
         self._connected_reactor_name : Optional[str] = None
 
@@ -100,9 +104,37 @@ class Input(Port, TriggerAction):
         self._connected_reactor_name = reactor_name
         self._reactor.ledger.connect_tag_rel_req(reactor_name)
         self._message_sub = Subscriber(f"{reactor_name}/{output_name}", self._receive_message)
+        self._loop_discovery_sub = Subscriber(f"{reactor_name}/{output_name}{LOOP_DISCOVERY_TOPIC_SUFFIX}", self._on_loop_discovery)
+        self._loop_detected_sub = Subscriber(f"{reactor_name}/{output_name}{LOOP_DETECTED_TOPIC_SUFFIX}", self._on_loop_detected)
         self._is_connected = True
         self._delay = delay
+    
+    def _on_loop_discovery(self, loop_discovery : LoopDiscovery):
+        if loop_discovery.origin == self._reactor.name:
+            self._reactor.logger.debug(f"Loop discovered at {self._reactor.name}.")
+            affected_outputs = self._reactor.get_affected_outputs(self)
+            affected_output_names = [output.name for output in affected_outputs]
+            if loop_discovery.origin_output in affected_output_names:
+                # maybe TODO: make sure the loop has a delay or we are stuck at this tag forever
+                # however, this could also be further down the loop if it is a nested loop
+                # so either expand the discovery to track the entire loop or 
+                # just dont mind at all whether the loop triggers itself without delay (as the user might actually want that)
+                self._reactor.logger.debug(f"Loop triggers itself.")
+            # TODO: if the loop has no delay, all of the loop participants have to "release together", as the loop could come back around with a new event but still being at the same tag (aka loop release)
+            self._reactor.get_output(loop_discovery.origin_output).relay_loop_detected(LoopDetected(loop_discovery.origin, loop_discovery.origin_output, loop_discovery.entries, self.name))
+        else:
+            affected_outputs = self._reactor.get_affected_outputs(self)
+            for output in affected_outputs:
+                loop_discovery.entries.append((self._reactor.name, self.name, output.name))
+                output.relay_loop_discovery(loop_discovery)
 
+    def _on_loop_detected(self, loop_discovery: LoopDiscovery):
+        self._reactor.ledger.update_loop_members(loop_discovery)
+        if loop_discovery.origin == self._reactor.name:
+            return
+        for output in self._reactor.get_affected_outputs(self):
+            output.relay_loop_detected(loop_discovery)
+        
     def _receive_message(self, tag : Tag):
         if self._delay is not None:
             self._reactor.schedule_action_async(self, tag.delay(self._delay))
@@ -131,6 +163,8 @@ class Output(Port):
         super().__init__(name, reactor)
         self._is_connected : bool = False
         self._message_pub : Optional[Publisher] = None
+        self._loop_discovery_pub: Optional[Publisher] = None
+        self._loop_detected_pub : Optional[Publisher] = None
 
     def set(self, tag : Tag):
         if self._is_connected:
@@ -139,7 +173,16 @@ class Output(Port):
     def connect(self, reactor_name : str):
         self._reactor.ledger.connect_tag_rel_req(reactor_name)
         self._message_pub = Publisher(f"{self._reactor.name}/{self._name}")
+        self._loop_discovery_pub = Publisher(f"{self._reactor.name}/{self._name}{LOOP_DISCOVERY_TOPIC_SUFFIX}")
+        self._loop_discovery_pub.publish(LoopDiscovery(self._reactor.name, self._name, []))
+        self._loop_detected_pub = Publisher(f"{self._reactor.name}/{self._name}{LOOP_DETECTED_TOPIC_SUFFIX}")
         self._is_connected = True
+
+    def relay_loop_discovery(self, loop_discovery : LoopDiscovery):
+        self._loop_discovery_pub.publish(loop_discovery)
+
+    def relay_loop_detected(self, loop_detected : LoopDetected):
+        self._loop_detected_pub.publish(loop_detected)
 
 @dataclass
 class ReactionDeclaration:
@@ -209,12 +252,25 @@ class ActionList:
         for entry in self._list:
             r += repr(entry)
         return r
+    
+@dataclass
+class LoopDiscovery:
+    origin : str
+    origin_output : str
+    # TODO: add delay to loop detection
+    entries : List[tuple[str, str, str]] # reactor, input, output
+
+@dataclass
+class LoopDetected(LoopDiscovery):
+    origin_input : str
 
 class FederateLedger(RegisteredReactor):
     def __init__(self, reactor) -> None:
         super().__init__(reactor)
         self._released_lock : threading.Lock = threading.Lock()
         self._released : Dict[str, Tag] = {}
+        self._loop_member_lock : threading.Lock = threading.Lock()
+        self._loop_members : set[frozenset] = set()
 
         #self._reactor.register_release_tag_callback(lambda t: self.update_release(self._reactor.name, t))
         self._own_release_pub : Publisher = Publisher(self._reactor.name + TAG_RELEASE_TOPIC_SUFFIX)
@@ -231,6 +287,13 @@ class FederateLedger(RegisteredReactor):
             if current is None or tag > current:
                 self._released[reactor_name] = tag
         self._reactor.notify()
+
+    def update_loop_members(self, loop_detected: LoopDetected) -> None:
+        new_set_entries = [entry[0] for entry in loop_detected.entries if entry[0]] + [loop_detected.origin]
+        new_set = frozenset(filter(lambda e: e != self._reactor.name, new_set_entries))
+        with self._loop_member_lock:
+            self._loop_members.add(new_set)
+            self._reactor.logger.debug(f"Loop members: {self._loop_members}")
 
     def get_release(self, reactor_name) -> Tag:
         with self._released_lock:
@@ -418,6 +481,9 @@ class Reactor(Named):
 
     def _get_triggered_reactions(self, action: TriggerAction) -> List[Reaction]:
         return [reaction for reaction in self._reactions if action in reaction.triggers]
+    
+    def get_affected_outputs(self, input: Input) -> List[Output]:
+        return [output for reaction in self._reactions for output in reaction.effects if input in reaction.triggers and isinstance(output, Output)]
 
     def wait_for(self, predicate) -> bool:
         return self._reaction_q_cv.wait_for(predicate)
