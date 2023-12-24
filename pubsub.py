@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Callable, List, Any, Optional, Union
 import threading
 import logging
+import random
 
 import utility
 
@@ -51,6 +52,7 @@ class CommunicationBus(metaclass=utility.Singleton):
             current_topics = []
             with self._topics_lock:
                 current_topics = self._topics.copy()
+            random.shuffle(current_topics) # there is no order guarantee for topics, simulating that here
             for topic in current_topics:
                 topic.run_sub_callbacks()
             with self._run_subscriber_cbs_lock:
