@@ -18,7 +18,6 @@ class LoggingLock:
         self._lock.release()
         self._logger.debug(f'Lock {self._name} released.')
 
-
     def __enter__(self):
         self.acquire()
         return self
@@ -36,9 +35,9 @@ class LoggingCondition:
         self._name = name
 
     def acquire(self):
-        self._logger.debug(f'Condition {self._name} acquiring...')
+        self._logger.debug(f'Condition {self._name} acquiring...  Thread ID: {threading.current_thread().ident}')
         self._cond.acquire()
-        self._logger.debug(f'Condition {self._name} acquired.')
+        self._logger.debug(f'Condition {self._name} acquired. Thread ID: {threading.current_thread().ident}')
 
     def release(self):
         self._cond.release()
@@ -65,14 +64,12 @@ class LoggingCondition:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.release()
-
-    def locked(self):
-        return self._cond.locked()
     
-    def wait_for(self, predicate, timeout=None):
+    def wait_for(self, predicate, timeout=None) -> bool:
         self._logger.debug(f'Condition {self._name} waiting for...')
-        self._cond.wait_for(predicate, timeout)
+        result = self._cond.wait_for(predicate, timeout)
         self._logger.debug(f'Condition {self._name} waited for.')
+        return result
     
     def __str__(self):
         return f'LoggingCondition({self._name})'
