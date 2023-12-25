@@ -64,6 +64,9 @@ class Tag:
         if self._microstep == 0:
             return Tag(self._time - 1, Tag._UINT64_MAX)
         return Tag(self._time, self._microstep - 1)
+
+    def __hash__(self) -> int:
+        return hash((self._time, self._microstep))
     
 assert Tag(time=0, microstep=1) < Tag(time=1, microstep=0)
 assert Tag(time=1, microstep=0) < Tag(time=1, microstep=1)
