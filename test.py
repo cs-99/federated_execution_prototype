@@ -158,16 +158,16 @@ if __name__ == "__main__":
     ]
     # log level INFO logs only executed actions
     # log level DEBUG logs some coordination too
-    logging.basicConfig(handlers=log_handlers, level=logging.INFO)
+    logging.basicConfig(handlers=log_handlers, level=logging.DEBUG)
 
     # start at tag 1000 sec for better readability
     start_tag = Tag(secs_to_ns(1000)) 
     stop_tag = start_tag.delay(secs_to_ns(5))
     #reactors : List[Reactor] = [create_random_reactor(f"random_reactor{i}", start_tag, stop_tag) for i in range(1)]
     #reactors = create_pub_sub_reactors(start_tag, stop_tag)
-    #reactors = create_cycle_reactors(start_tag, stop_tag)
+    reactors = create_cycle_reactors(start_tag, stop_tag)
     #reactors = create_double_cycle_reactors(start_tag, stop_tag, delay_1=0.01)
-    reactors = create_deep_loop(start_tag, stop_tag)
+    # reactors = create_deep_loop(start_tag, stop_tag)
     for reactor in reactors:
         logging.info(reactor)
     try:

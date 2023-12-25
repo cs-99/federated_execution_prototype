@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import total_ordering
 from typing import Callable, Dict, List, Optional, Tuple, Any
 import threading
+from logging_primitives import LoggingCondition, LoggingLock
 from pubsub import Subscriber, Publisher
 import logging # thread safe by default
 
@@ -13,10 +14,6 @@ import logging # thread safe by default
 from tag import Tag
 import utility
 
-print_lock = threading.Lock()
-def print_locked(*args, **kwargs):
-    with print_lock:
-        print(*args, **kwargs)
     
 class Named:
     def __init__(self, name) -> None:
@@ -44,8 +41,7 @@ class Action(Named, RegisteredReactor):
         self._function = function
 
     def exec(self, tag : Tag):
-        print_locked(f"Reactor {self._reactor.name}: {self._name} executing at {tag}.")
-        #self._reactor.logger.info(f"{self._name} executing at {tag}.")
+        self._reactor.logger.info(f"{self._name} executing at {tag}.")
         self._function(tag)
 
 @dataclass
@@ -116,6 +112,7 @@ class Input(Port, TriggerAction):
         if self._is_connected:
             raise ValueError(f"{self._reactor}/{self.name} is already connected.")
         self._connected_reactor_name = reactor_name
+        self._reactor.logger.debug(f"{self._reactor.name}/{self.name} connecting to {reactor_name}/{output_name}.")
         self._message_sub = Subscriber(f"{reactor_name}/{output_name}", self._receive_message)
         self._loop_discovery_sub = Subscriber(f"{reactor_name}/{output_name}{LOOP_DISCOVERY_TOPIC_SUFFIX}", self._on_loop_discovery)
         self._loop_detected_sub = Subscriber(f"{reactor_name}/{output_name}{LOOP_DETECTED_TOPIC_SUFFIX}", self._on_loop_detected)
@@ -162,47 +159,72 @@ class Input(Port, TriggerAction):
             self._reactor.schedule_action_async(self, msg.tag)
         
 
-    def _acquire_tag_predicate(self, tag_to_acquire : Tag, loop_acquire_origins: set[str], predicate : Callable[[None], bool]):
+    def _acquire_tag_predicate(self, tag_to_acquire : Tag, predicate : Callable[[None], bool]) -> bool:
         # connected reactor released the tag
-        result = tag_to_acquire <= self._released
+        if tag_to_acquire <= self._released:
+            self._reactor.logger.debug(f"{self.name} acquired {tag_to_acquire} because it was released by {self._connected_reactor_name}.")
+            return True
         # or all loop members have acquired the tag (for every loop that the connected reactor is part of)
         # this is when this reactor started the loop acquire
-        result = result or self._reactor.ledger.check_loops_acquired(self._connected_reactor_name, tag_to_acquire)
-        # or the connected reactor is part of (one of the) loop(s) which started the loop acquire
-        # this is when loops are discovered later than the acquire was started
-        result = result or self._reactor.ledger.is_part_of_same_loops(self._connected_reactor_name, loop_acquire_origins)
+        # however, it must be before the last acquired tag
+        # this is the case for the reactor that has the first delay before the original event that triggered the loop acquire
+        if self._reactor.ledger.check_loops_acquired(self._connected_reactor_name, tag_to_acquire) \
+             and not self._reactor.ledger.is_last_tag_fully_acquired_by_loops(self._connected_reactor_name, tag_to_acquire):
+                self._reactor.logger.debug(f"{self.name} acquired {tag_to_acquire} because all loop members have acquired it.")
+                return True
+        # we have discovered that we are part of a loop (and have not requested the corresponding loop acquire yet)
+        if self._reactor.ledger.is_loop_member(self._connected_reactor_name) \
+                and not self._reactor.ledger.requested_all_loop_acquires_already(self._connected_reactor_name, tag_to_acquire):
+            self._reactor.logger.debug(f"{self.name} requested loop acquire for {tag_to_acquire}.")
+            self._reactor.ledger.request_acquire_loops_where_is_member(self._connected_reactor_name, tag_to_acquire)
+            
+            return True
         # or the predicate is true (i.e. the actionlist in the scheduling has been modified)
-        result = result or predicate()
-        return result
+        return predicate()
     
-    def _loop_acquire_predicate(self, loop_acquire_origins: set[str], predicate : Callable[[None], bool] = lambda: False) -> bool:
-        result = self._reactor.ledger.is_part_of_same_loops(self._connected_reactor_name, loop_acquire_origins)
-    
-    def loop_acquire_tag(self, tag : Tag, loop_acquire_origins: set[str], predicate : Callable[[None], bool] = lambda: False) -> bool:
-        # the first condition is probably not needed (covered in second condition)
-        if self._connected_reactor_name in loop_acquire_origins \
-            or self._reactor.ledger.is_part_of_same_loops(self._connected_reactor_name, loop_acquire_origins) \
-            or not self._is_connected:
+    def _loop_acquire_predicate(self, tag_to_acquire : Tag, loop_acquire_origins: set[str], predicate : Callable[[None], bool]) -> bool:
+        # if we are part of one of the requested loops
+        if self._reactor.ledger.is_part_of_same_loops(self._connected_reactor_name, loop_acquire_origins):
+            self._reactor.logger.debug(f"{self.name} is part of the same loops as {self._connected_reactor_name}.")
             return True
         
-        self.acquire_tag(tag, loop_acquire_origins, lambda: predicate() or self._reactor)
-
-    def acquire_tag(self, tag : Tag, loop_acquire_origins: set[str], predicate : Callable[[None], bool] = lambda: False) -> bool:
+        # or we have acquired the tag normally
+        return self._acquire_tag_predicate(tag_to_acquire, predicate)
+        
+    
+    def loop_acquire_tag(self, tag : Tag, loop_acquire_origins: set[str], predicate : Callable[[None], bool] = lambda: False) -> bool:
         tag_to_acquire = tag
         if self._delay is not None:
             tag_to_acquire = tag.subtract(self._delay)
-        self._reactor.logger.debug(f"{self.name} acquiring {tag_to_acquire}.")
-        if tag_to_acquire <= self._released \
-            or self._connected_reactor_name in loop_acquire_origins \
-            or self._reactor.ledger.is_part_of_same_loops(self._connected_reactor_name, loop_acquire_origins) \
+        
+        if not self._is_connected:
+            return True
+        
+        res = self._reactor.wait_for(lambda: self._loop_acquire_predicate(tag_to_acquire, loop_acquire_origins, predicate))
+        return res
+
+    def acquire_tag(self, tag : Tag, predicate : Callable[[None], bool] = lambda: False) -> bool:
+        tag_to_acquire = tag
+        if self._delay is not None:
+            tag_to_acquire = tag.subtract(self._delay)
+        
+        if self._released >= tag_to_acquire \
             or not self._is_connected:
             return True
-        if self._reactor.ledger.is_loop_member(self._connected_reactor_name):
-            self._reactor.ledger.request_acquire_loops_where_is_member(self._connected_reactor_name, tag_to_acquire)
+        
+        # see acquire_tag_predicate for explanation
+        if self._reactor.ledger.check_loops_acquired(self._connected_reactor_name, tag_to_acquire) \
+            and not self._reactor.ledger.is_last_tag_fully_acquired_by_loops(self._connected_reactor_name, tag_to_acquire):
+                return True
+        
+        if self._reactor.ledger.is_loop_member(self._connected_reactor_name) \
+            and not self._reactor.ledger.requested_all_loop_acquires_already(self._connected_reactor_name, tag_to_acquire):
+                self._reactor.ledger.request_acquire_loops_where_is_member(self._connected_reactor_name, tag_to_acquire)
+                return False
         else:
             self.request_empty_event_at( tag_to_acquire)
         self._reactor.logger.debug(f"{self.name} waiting for tag release {tag_to_acquire}.")
-        return self._reactor.wait_for(lambda: self._acquire_tag_predicate(tag_to_acquire, loop_acquire_origins, predicate))
+        return self._reactor.wait_for(lambda: self._acquire_tag_predicate(tag_to_acquire, predicate))
 
     def request_empty_event_at(self, tag : Tag):
         assert self._empty_request_pub is not None
@@ -230,6 +252,7 @@ class Output(Port):
             self._message_pub.publish(PortMessage(tag, None))
 
     def connect(self, reactor_name : str):
+        self._reactor.logger.debug(f"{self._reactor.name}/{self.name} connecting to {reactor_name}.")
         self._message_pub = Publisher(f"{self._reactor.name}/{self._name}")
         self._loop_discovery_pub = Publisher(f"{self._reactor.name}/{self._name}{LOOP_DISCOVERY_TOPIC_SUFFIX}")
         self._loop_discovery_pub.publish(LoopDiscovery(self._reactor.name, self._name, []))
@@ -390,13 +413,19 @@ LOOP_TOPIC_SUFFIX = "__loop__"
 class FederateLoopLedger(RegisteredReactor):
     def __init__(self, reactor) -> None:
         super().__init__(reactor)
-        self._loops_lock : threading.Lock = threading.Lock()
-        self._loops : Dict[frozenset, Tuple[Publisher, Subscriber]] = {}
+        self._loops_lock : threading.Lock = LoggingLock("loops_lock", self._reactor.logger)
+        self._loops : Dict[frozenset, Tuple[Publisher, Subscriber, set[Tag]]] = {} # set of members -> (pub, sub, set of requested tags)
         self._loop_acquired : Dict[str, Tag] = {}
 
     def _on_loop_acquire_request(self, request: LoopMessage):
+        if self._reactor.name == request.request_origin:
+            return
         self._reactor.logger.debug(f"Loop acquire request from {request.request_origin} at {request.tag}.")
-        self._reactor.schedule_loop_acquire(request.tag, request.request_origin)
+        with self._loops_lock:
+            for loop in self._loops:
+                if request.request_origin in loop:
+                    self._loops[loop][2].add(request.tag)
+        self._reactor.schedule_loop_acquire_async(request.tag, request.request_origin)
     
     def is_part_of_same_loops(self, reactor_name: str, loop_acquire_origins: set[str]) -> bool:
         with self._loops_lock:
@@ -416,17 +445,36 @@ class FederateLoopLedger(RegisteredReactor):
                 for origin in loop_acquire_origins:
                     if origin in loop:
                         self._loops[loop][0].publish(LoopMessage(self._reactor.name, origin, True, tag))
+            self._loop_acquired[self._reactor.name] = tag
 
     def request_acquire_loops_where_is_member(self, reactor_name: str, tag: Tag) -> None:
         with self._loops_lock:
             for loop in self._loops:
                 if reactor_name in loop:
                     self._loops[loop][0].publish(LoopMessage(self._reactor.name, self._reactor.name, False, tag))
+                    self._loops[loop][2].add(tag)
+                    self._reactor.schedule_loop_acquire_sync(tag, self._reactor.name)
+    
+    def requested_all_loop_acquires_already(self, reactor_name: str, tag: Tag) -> bool:
+        with self._loops_lock:
+            for loop in self._loops:
+                if reactor_name in loop:
+                    if tag not in self._loops[loop][2]:
+                        return False
+        return True
 
     def _on_loop_acquire_success(self, msg: LoopMessage):
         with self._loops_lock:
             if self._loop_acquired.get(msg.sender) is None or msg.tag > self._loop_acquired[msg.sender]:
                 self._loop_acquired[msg.sender] = msg.tag
+            # remove successful tags from request set
+            for loop in self._loops:
+                if msg.sender in loop:
+                    for member in loop:
+                        if self._loop_acquired[member] < msg.tag:
+                            self._reactor.notify()
+                            return
+                    self._loops[loop][2].remove(msg.tag)
         self._reactor.notify()
 
     def check_loops_acquired(self, loop_member, tag: Tag) -> bool:
@@ -468,12 +516,15 @@ class FederateLoopLedger(RegisteredReactor):
             if new_set in self._loops:
                 return
             self._loops[new_set] = (Publisher(self.create_loop_topic_name(new_set)), 
-                                    Subscriber(self.create_loop_topic_name(new_set), self._on_loop_message))
+                                    Subscriber(self.create_loop_topic_name(new_set), self._on_loop_message), 
+                                    set())
             self._reactor.logger.debug(f"New loop detected: {new_set}.")
         self._reactor.notify()
         
 
     def _on_loop_message(self, msg : LoopMessage):
+        if msg.sender == self._reactor.name:
+            return
         if msg.success:
             self._on_loop_acquire_success(msg)
         else:
@@ -489,6 +540,7 @@ class Reactor(Named):
                 timers: List[TimerDeclaration] = None, reactions:List[ReactionDeclaration]=None):
         assert start_tag < stop_tag
         super().__init__(name)
+        self._logger : logging.Logger = logging.getLogger(self._name)
         self._release_tag_callbacks : List[Callable[[Tag], None]] = []
         self._inputs : List[Input]= [Input(input, self) for input in inputs] if inputs is not None else []
         self._outputs : List[Output]= [Output(output, self) for output in outputs] if outputs is not None else []
@@ -512,11 +564,9 @@ class Reactor(Named):
         self._reaction_q.add(self._start_tag, Action("__start__", self))
         self._reaction_q.add(self._stop_tag, Action("__stop__", self))
         self._reaction_q_lock : threading.Lock = threading.Lock()
-        self._reaction_q_cv : threading.Condition = threading.Condition(self._reaction_q_lock)
+        self._reaction_q_cv : threading.Condition = LoggingCondition("reaction_q_cv", self.logger, self._reaction_q_lock)
         self._loop_acquiries : LoopAcquireRequests = LoopAcquireRequests()
         self._ledger : FederateLoopLedger = FederateLoopLedger(self)
-
-        self._logger : logging.Logger = logging.getLogger(self._name)
 
         self._own_request_sub : Subscriber = Subscriber(self.name + TAG_REQUEST_TOPIC_SUFFIX, self._on_tag_reqest) 
         
@@ -632,12 +682,19 @@ class Reactor(Named):
             self._reaction_q_cv.notify()
         return True
     
-    def schedule_loop_acquire(self, requested_tag : Tag, request_origin : str) -> bool:
+    def schedule_loop_acquire_async(self, requested_tag : Tag, request_origin : str) -> bool:
         with self._reaction_q_cv:
             if requested_tag <= self._current_tag or requested_tag >= self._stop_tag:
                 return False
             self._loop_acquiries.add(requested_tag, request_origin)
             self._reaction_q_cv.notify()
+        return True
+    
+    def schedule_loop_acquire_sync(self, requested_tag : Tag, request_origin : str) -> bool:
+        assert self._reaction_q_lock.locked()
+        if requested_tag <= self._current_tag or requested_tag >= self._stop_tag:
+            return False
+        self._loop_acquiries.add(requested_tag, request_origin)
         return True
     
     # this method assumes that self._reaction_q_cv is held
@@ -660,17 +717,20 @@ class Reactor(Named):
     def get_affected_outputs(self, input: Input) -> List[Output]:
         return [output for reaction in self._reactions for output in reaction.effects if input in reaction.triggers and isinstance(output, Output)]
 
-    def wait_for(self, predicate : Callable[[], bool]) -> bool:
+    def wait_for(self, predicate : Callable[[None], bool]) -> bool:
+        assert self._reaction_q_lock.locked()
         return self._reaction_q_cv.wait_for(predicate)
 
     def notify(self) -> None:
         # in python notifying requires holding the lock, this is not the case in cpp
         # see https://stackoverflow.com/questions/46076186/why-does-python-threading-condition-notify-require-a-lock
         # TODO: check if it might be a good idea to acquire in the cpp impl too?
+        self.logger.debug(f"{self._name} notifying.")
         with self._reaction_q_cv:
             self._reaction_q_cv.notify()
 
     def _get_next_tag(self) -> Tuple[Tag, set[str]]:
+        assert self._reaction_q_lock.locked()
         loop_acquire_tag = self._loop_acquiries.next_tag()
         reaction_q_tag = self._reaction_q.next_tag()
         if loop_acquire_tag is None or loop_acquire_tag > reaction_q_tag:
@@ -681,6 +741,7 @@ class Reactor(Named):
         return self._reaction_q.next_tag() is not None or self._loop_acquiries.next_tag() is not None
 
     def run(self):
+        self._logger.debug(f"Thread id: {threading.current_thread().ident}.")
         with self._reaction_q_cv:
             self._schedule_timers_once()
         # releasing the tag directly before the start tag here
@@ -696,7 +757,6 @@ class Reactor(Named):
                 loop_acquire_origins : set[str] 
                 next_tag, loop_acquire_origins = self._get_next_tag()
                 refetch_next_tag = False
-
                 if loop_acquire_origins:
                     for input in self._inputs:
                         result : bool = input.loop_acquire_tag(next_tag, loop_acquire_origins, lambda: self._get_next_tag() != (next_tag, loop_acquire_origins))
