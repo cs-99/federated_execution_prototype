@@ -14,6 +14,8 @@ import logging # thread safe by default
 from tag import Tag
 import utility
 
+# TODO: check lock acquiring order such that it is totally ordered and no deadlocks can occur
+# loop lock and reaction_q_lock are acquired in different orders, therefore they can deadlock
     
 class Named:
     def __init__(self, name) -> None:
@@ -421,11 +423,13 @@ class FederateLoopLedger(RegisteredReactor):
         if self._reactor.name == request.request_origin:
             return
         self._reactor.logger.debug(f"Loop acquire request from {request.request_origin} at {request.tag}.")
+
         with self._loops_lock:
             for loop in self._loops:
                 if request.request_origin in loop:
-                    self._loops[loop][2].add(request.tag)
-        self._reactor.schedule_loop_acquire_async(request.tag, request.request_origin)
+                    if request.tag not in self._loops[loop][2]:
+                        self._loops[loop][2].add(request.tag)
+                        self._reactor.schedule_loop_acquire_async(request.tag, request.request_origin)
     
     def is_part_of_same_loops(self, reactor_name: str, loop_acquire_origins: set[str]) -> bool:
         with self._loops_lock:
@@ -440,20 +444,35 @@ class FederateLoopLedger(RegisteredReactor):
         return '/'.join(sorted(members)) + LOOP_TOPIC_SUFFIX
 
     def loop_acquire_success(self, tag: Tag, loop_acquire_origins: set[str]) -> None:
-         with self._loops_lock:
+        with self._loops_lock:
             for loop in self._loops:
                 for origin in loop_acquire_origins:
                     if origin in loop:
                         self._loops[loop][0].publish(LoopMessage(self._reactor.name, origin, True, tag))
             self._loop_acquired[self._reactor.name] = tag
+        self._remove_tag_if_done(self._reactor.name, tag)
+
+    def _remove_tag_if_done(self, successful_member : str, tag: Tag) -> None:
+        with self._loops_lock:
+            for loop in self._loops:
+                if successful_member in loop:
+                    tag_done = True
+                    for member in loop:
+                        if member not in self._loop_acquired or self._loop_acquired[member] < tag:
+                            tag_done = False
+                            break
+                    if tag_done:
+                        self._loops[loop][2].remove(tag)
+
 
     def request_acquire_loops_where_is_member(self, reactor_name: str, tag: Tag) -> None:
         with self._loops_lock:
             for loop in self._loops:
                 if reactor_name in loop:
-                    self._loops[loop][0].publish(LoopMessage(self._reactor.name, self._reactor.name, False, tag))
-                    self._loops[loop][2].add(tag)
-                    self._reactor.schedule_loop_acquire_sync(tag, self._reactor.name)
+                    if tag not in self._loops[loop][2]:
+                        self._loops[loop][0].publish(LoopMessage(self._reactor.name, self._reactor.name, False, tag))
+                        self._loops[loop][2].add(tag)
+                        self._reactor.schedule_loop_acquire_sync(tag, self._reactor.name)
     
     def requested_all_loop_acquires_already(self, reactor_name: str, tag: Tag) -> bool:
         with self._loops_lock:
@@ -467,14 +486,7 @@ class FederateLoopLedger(RegisteredReactor):
         with self._loops_lock:
             if self._loop_acquired.get(msg.sender) is None or msg.tag > self._loop_acquired[msg.sender]:
                 self._loop_acquired[msg.sender] = msg.tag
-            # remove successful tags from request set
-            for loop in self._loops:
-                if msg.sender in loop:
-                    for member in loop:
-                        if self._loop_acquired[member] < msg.tag:
-                            self._reactor.notify()
-                            return
-                    self._loops[loop][2].remove(msg.tag)
+            self._remove_tag_if_done(msg.sender, msg.tag)
         self._reactor.notify()
 
     def check_loops_acquired(self, loop_member, tag: Tag) -> bool:
