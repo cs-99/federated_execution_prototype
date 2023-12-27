@@ -6,15 +6,16 @@ from dataclasses import dataclass
 from functools import total_ordering
 from typing import Callable, Dict, List, Optional, Tuple, Any
 import threading
-from logging_primitives import LoggingCondition, LoggingLock
-from pubsub import Subscriber, Publisher
 import logging # thread safe by default
-from declarations import TimerDeclaration, ReactionDeclaration
+
 # custom files from here
 from tag import Tag
 import utility
+from logging_primitives import LoggingCondition, LoggingLock
+from pubsub import Subscriber, Publisher
+from declarations import TimerDeclaration, ReactionDeclaration
+from messagetypes import PortMessage, LoopDiscovery, LoopDetected, LoopMessage
 
-    
 class Named:
     def __init__(self, name) -> None:
         self._name : str = name
@@ -43,7 +44,6 @@ class Action(Named, RegisteredReactor):
     def exec(self, tag : Tag):
         self._reactor.logger.info(f"{self._name} executing at {tag}.")
         self._function(tag)
-
 
 
 # this class is just to distinguish triggers (timer, inputs) from reactions for now
@@ -78,11 +78,6 @@ class Port(Named, RegisteredReactor):
     def __init__(self, name, reactor : Reactor):
         Named.__init__(self, name)
         RegisteredReactor.__init__(self, reactor)
-
-@dataclass
-class PortMessage:
-    tag : Tag
-    message : Optional[Any]
 
 """
 Input and Output are also the endpoints for communication
@@ -378,26 +373,6 @@ class LoopAcquireRequests:
 
     def __repr__(self) -> str:
         return ''.join(repr(entry) for entry in self._list)
-
-    
-@dataclass
-class LoopDiscovery:
-    origin : str
-    origin_output : str
-    # TODO: add delay to loop detection
-    entries : List[tuple[str, str, str]] # reactor, input, output
-
-@dataclass
-class LoopDetected(LoopDiscovery):
-    origin_input : str
-
-
-@dataclass 
-class LoopMessage : 
-    sender : str
-    request_origin : str
-    success : bool # if false, its a request
-    tag : Tag
 
 
 LOOP_TOPIC_SUFFIX = "__loop__"
@@ -826,8 +801,4 @@ class Reactor(Named):
 
             if stop_running:
                 return
-
-
-
-    
 
