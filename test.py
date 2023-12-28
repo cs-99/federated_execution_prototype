@@ -58,8 +58,8 @@ def run_reactors(reactors : List[Reactor]):
     comms.stop_running_subscriber_callbacks()
 
 def connect(reactor_out : Reactor, output_name : str, reactor_in : Reactor, input_name : str, delay : Optional[int] = None) -> None:
-    reactor_out.get_output(output_name).connect(reactor_in.name)
-    reactor_in.get_input(input_name).connect(reactor_out.name, output_name, delay)
+    reactor_out.get_output(output_name).connect(reactor_in.name, input_name)
+    reactor_in.get_input(input_name).connect(reactor_out.name, delay)
 
 def create_pub_sub_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs : float = 0.5) -> List[Reactor]:
     reactors = []
@@ -147,7 +147,7 @@ def create_deep_loop(start_tag : Tag, stop_tag : Tag, message_every_secs : float
     connect(reactors[0], "out", reactors[1], "in")
     connect(reactors[1], "out", reactors[2], "in")
     connect(reactors[2], "out", reactors[3], "in")
-    connect(reactors[3], "out", reactors[0], "in", 1)
+    connect(reactors[3], "out", reactors[0], "in", secs_to_ns(0.3))
     return reactors
 
 

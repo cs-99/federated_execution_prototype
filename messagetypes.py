@@ -2,13 +2,26 @@ from tag import Tag
 from typing import List, Tuple, Optional, Any
 from dataclasses import dataclass
 
-@dataclass
-class PortMessage:
-    tag : Tag
-    message : Optional[Any]
 
 @dataclass
-class LoopDiscovery:
+class ReleaseMessage:
+    tag : Tag
+
+@dataclass
+class RequestMessage:
+    tag : Tag
+
+@dataclass
+class MessageToInput:
+    receiving_input : str
+    
+@dataclass
+class PortMessage(MessageToInput):
+    tag : Tag
+    message : Any
+    
+@dataclass
+class LoopDiscovery(MessageToInput):
     origin : str
     origin_output : str
     # TODO: add delay to loop detection
@@ -17,7 +30,6 @@ class LoopDiscovery:
 @dataclass
 class LoopDetected(LoopDiscovery):
     origin_input : str
-
 
 @dataclass 
 class LoopMessage : 
