@@ -158,7 +158,7 @@ if __name__ == "__main__":
     ]
     # log level INFO logs only executed actions
     # log level DEBUG logs some coordination too
-    logging.basicConfig(handlers=log_handlers, level=logging.INFO)
+    logging.basicConfig(handlers=log_handlers, level=logging.DEBUG)
 
     # start at tag 1000 sec for better readability
     start_tag = Tag(secs_to_ns(1000)) 

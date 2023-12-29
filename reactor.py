@@ -99,7 +99,7 @@ class Input(Port, TriggerAction):
             raise ValueError(f"{self._reactor}/{self.name} is already connected.")
         self._connected_reactor_name = reactor_name
         self._reactor.logger.debug(f"{self._reactor.name}/{self.name} connecting to {reactor_name}.")
-        self._reactor.connections.connect_input(reactor_name)
+        self._reactor.connections.connect_to_reactor(reactor_name)
         self._delay = delay
         self._is_connected = True
 
@@ -185,7 +185,8 @@ class Output(Port):
         super().__init__(name, reactor)
     
     def connect(self, reactor_name : str, input_name : str):
-        self._reactor.connections.connect_output(self.name, reactor_name, input_name)
+        self._reactor.connections.connect_to_reactor(reactor_name)
+        self._reactor.connections.register_outgoing_connection(self.name, reactor_name, input_name)
 
     def start_loop_discovery(self):
         self._reactor.connections.start_loop_discovery(self.name)
@@ -506,15 +507,12 @@ class ReactorConnections(RegisteredReactor):
     def request_empty_event_at(self, reactor_name: str, tag: Tag):
         self._publishers[reactor_name].publish(RequestMessage(tag))
 
-    def connect_input(self, other_reactor_name: str):
+    def connect_to_reactor(self, other_reactor_name: str):
         if other_reactor_name not in self._publishers:
             self._publishers[other_reactor_name] = Publisher(LF_CONNECTION_PREFIX + self._reactor.name + "/" + other_reactor_name)
             self._subscribers[other_reactor_name] = Subscriber(LF_CONNECTION_PREFIX + other_reactor_name + "/" + self._reactor.name, lambda msg: self._on_message(other_reactor_name, msg))
 
-    def connect_output(self, output_name, other_reactor_name: str, other_reactors_input):
-        if other_reactor_name not in self._publishers:
-            self._publishers[other_reactor_name] = Publisher(LF_CONNECTION_PREFIX + self._reactor.name + "/" + other_reactor_name)
-            self._subscribers[other_reactor_name] = Subscriber(LF_CONNECTION_PREFIX + other_reactor_name + "/" + self._reactor.name, lambda msg: self._on_message(other_reactor_name, msg))
+    def register_outgoing_connection(self, output_name, other_reactor_name: str, other_reactors_input):
         if output_name not in self._outgoing_connections:
             self._outgoing_connections[output_name] = [(other_reactor_name, other_reactors_input)]
         else:
@@ -552,7 +550,7 @@ class ReactorConnections(RegisteredReactor):
             
             self._send_message_to_connected_inputs(loop_discovery.origin_output, LoopDetected(RECEIVING_INPUT_PLACEHOLDER, loop_discovery.origin, loop_discovery.origin_output, loop_discovery.entries, loop_discovery.receiving_input))
         else:
-            affected_outputs = self._reactor.get_affected_outputs(self)
+            affected_outputs = self._reactor.get_affected_outputs(self._reactor.get_input(loop_discovery.receiving_input))
             for output in affected_outputs:
                 loop_discovery.entries.append((self._reactor.name, loop_discovery.receiving_input, output.name))
                 loop_discovery.receiving_input = RECEIVING_INPUT_PLACEHOLDER
@@ -560,11 +558,10 @@ class ReactorConnections(RegisteredReactor):
 
 
     def _on_loop_detected(self, loop_detected: LoopDetected):
-        self._reactor.logger.debug(f"Loop detected at {self._reactor.name}.")
-        #self._reactor.ledger.update_loop_members(loop_detected)
+        self._reactor.ledger.update_loop_members(loop_detected)
         if loop_detected.origin == self._reactor.name:
             return
-        for output in self._reactor.get_affected_outputs(self):
+        for output in self._reactor.get_affected_outputs(self._reactor.get_input(loop_detected.receiving_input)):
             loop_detected.receiving_input = RECEIVING_INPUT_PLACEHOLDER
             self._send_message_to_connected_inputs(output.name, loop_detected)
 
