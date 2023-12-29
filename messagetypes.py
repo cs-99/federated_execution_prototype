@@ -33,7 +33,6 @@ class LoopDetected(LoopDiscovery):
 
 @dataclass 
 class LoopMessage : 
-    sender : str
     request_origin : str
     success : bool # if false, its a request
     tag : Tag

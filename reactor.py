@@ -317,7 +317,7 @@ class FederateLedger(RegisteredReactor):
     def __init__(self, reactor) -> None:
         super().__init__(reactor)
         self._loops_lock : threading.Lock = LoggingLock("loops_lock", self._reactor.logger)
-        self._loops : Dict[frozenset, Tuple[Publisher, Subscriber, set[Tag], Tag]] = {} # set of members -> (pub, sub, set of requested tags, last tag done by entire loop)
+        self._loops : Dict[frozenset, Tuple[set[Tag], Tag]] = {} # set of members -> (pub, sub, set of requested tags, last tag done by entire loop)
         self._loop_acquired : Dict[str, Tag] = {}
         self._releases_lock : threading.Lock = threading.Lock()
         self._releases : Dict[str, Tag] = {}
@@ -331,18 +331,16 @@ class FederateLedger(RegisteredReactor):
         with self._releases_lock:
             return reactor_name in self._releases and self._releases[reactor_name] >= tag
 
-    def _on_loop_acquire_request(self, request: LoopMessage):
-        if self._reactor.name == request.request_origin:
-            return
+    def _on_loop_acquire_request(self, sender_name : str, request: LoopMessage):
         self._reactor.logger.debug(f"Loop acquire request from {request.request_origin} at {request.tag}.")
 
         with self._reactor.reaction_q_cv:
             with self._loops_lock:
                 for loop in self._loops:
                     if request.request_origin in loop:
-                        if request.tag not in self._loops[loop][2]:
+                        if request.tag not in self._loops[loop][0]:
                             if self._reactor.schedule_loop_acquire_sync(request.tag, request.request_origin):
-                                self._loops[loop][2].add(request.tag)
+                                self._loops[loop][0].add(request.tag)
                             self._reactor.reaction_q_cv.notify()
     
     def is_part_of_same_loops(self, reactor_name: str, loop_acquire_origins: set[str]) -> bool:
@@ -354,17 +352,15 @@ class FederateLedger(RegisteredReactor):
                             return True
         return False
     
-    def create_loop_topic_name(self, members: set[str]) -> str:
-        return '/'.join(sorted(members)) + LOOP_TOPIC_SUFFIX
 
     def loop_acquire_success(self, tag: Tag, loop_acquire_origins: set[str]) -> None:
         with self._loops_lock:
-            for loop in self._loops:
-                for origin in loop_acquire_origins:
+            for origin in loop_acquire_origins:
+                for loop in self._loops:
                     if origin in loop:
-                        self._loops[loop][0].publish(LoopMessage(self._reactor.name, origin, True, tag))
+                        for member in loop:
+                            self._reactor.connections.send_loop_message(member, LoopMessage(origin, True, tag))
             self._loop_acquired[self._reactor.name] = tag
-            self._reactor.logger.debug(f"Loop acquire success : {tag}")
         self._remove_tag_if_done(self._reactor.name, tag)
         
 
@@ -378,19 +374,19 @@ class FederateLedger(RegisteredReactor):
                             tag_done = False
                             break
                     if tag_done:
-                        if tag > self._loops[loop][3]:
+                        if tag > self._loops[loop][1]:
                             # python does not allow setting a tuple entry directly, so cheating here a little
-                            self._loops[loop][3]._time = tag._time
-                            self._loops[loop][3]._microstep = tag._microstep
-                        self._reactor.logger.debug(f"Reactor name: {self._reactor.name}, reqs: {self._loops[loop][2]}, tag: {self._loops[loop][3]}.")
-                        if tag in self._loops[loop][2]:
-                            self._loops[loop][2].remove(tag)
+                            self._loops[loop][1]._time = tag._time
+                            self._loops[loop][1]._microstep = tag._microstep
+                        self._reactor.logger.debug(f"Reactor name: {self._reactor.name}, reqs: {self._loops[loop][0]}, tag: {self._loops[loop][1]}.")
+                        if tag in self._loops[loop][0]:
+                            self._loops[loop][0].remove(tag)
                         
     def next_requested_tag(self) -> Tag:
         with self._loops_lock:
             min_tag = Tag(Tag._UINT64_MAX, Tag._UINT64_MAX)
             for loop in self._loops:
-                for tag in self._loops[loop][2]:
+                for tag in self._loops[loop][0]:
                     if tag < min_tag:
                         min_tag = tag           
             return min_tag
@@ -401,10 +397,11 @@ class FederateLedger(RegisteredReactor):
             found = False
             for loop in self._loops:
                 if reactor_name in loop:
-                    if tag not in self._loops[loop][2] and tag > self._loops[loop][3]:
+                    if tag not in self._loops[loop][0] and tag > self._loops[loop][1]:
                         found = True
-                        self._loops[loop][0].publish(LoopMessage(self._reactor.name, self._reactor.name, False, tag))
-                        self._loops[loop][2].add(tag)
+                        for reactor in loop:
+                            self._reactor.connections.send_loop_message(reactor, LoopMessage(self._reactor.name, False, tag))
+                        self._loops[loop][0].add(tag)
             if found:
                 self._reactor.schedule_loop_acquire_sync(tag, self._reactor.name)
     
@@ -412,15 +409,15 @@ class FederateLedger(RegisteredReactor):
         with self._loops_lock:
             for loop in self._loops:
                 if reactor_name in loop:
-                    if tag not in self._loops[loop][2] and tag > self._loops[loop][3]:
+                    if tag not in self._loops[loop][0] and tag > self._loops[loop][1]:
                         return False
         return True
 
-    def _on_loop_acquire_success(self, msg: LoopMessage):
+    def _on_loop_acquire_success(self, sender_name : str, msg: LoopMessage):
         with self._loops_lock:
-            if self._loop_acquired.get(msg.sender) is None or msg.tag > self._loop_acquired[msg.sender]:
-                self._loop_acquired[msg.sender] = msg.tag
-        self._remove_tag_if_done(msg.sender, msg.tag)
+            if self._loop_acquired.get(sender_name) is None or msg.tag > self._loop_acquired[sender_name]:
+                self._loop_acquired[sender_name] = msg.tag
+        self._remove_tag_if_done(sender_name, msg.tag)
         self._reactor.notify()
 
     def check_loops_acquired(self, loop_member, tag: Tag) -> bool:
@@ -461,20 +458,18 @@ class FederateLedger(RegisteredReactor):
         with self._loops_lock:
             if new_set in self._loops:
                 return
-            self._loops[new_set] = (Publisher(self.create_loop_topic_name(new_set)), 
-                                    Subscriber(self.create_loop_topic_name(new_set), self._on_loop_message), 
-                                    set(), Tag(0))
+            self._loops[new_set] = (set(), Tag(0))
+            for member in new_set:
+                self._reactor.connections.connect_to_reactor(member)
             self._reactor.logger.debug(f"New loop detected: {new_set}.")
         self._reactor.notify()
         
 
-    def _on_loop_message(self, msg : LoopMessage):
-        if msg.sender == self._reactor.name:
-            return
+    def on_loop_message(self, sender_name : str, msg : LoopMessage):
         if msg.success:
-            self._on_loop_acquire_success(msg)
+            self._on_loop_acquire_success(sender_name, msg)
         else:
-            self._on_loop_acquire_request(msg)
+            self._on_loop_acquire_request(sender_name, msg)
 
 LF_CONNECTION_PREFIX = "__lf__"
 RECEIVING_INPUT_PLACEHOLDER = "__receiving_input__"
@@ -504,6 +499,9 @@ class ReactorConnections(RegisteredReactor):
     def send_portmessage(self, output_name: str, tag: Tag, message: Any):
         self._send_message_to_connected_inputs(output_name, PortMessage(RECEIVING_INPUT_PLACEHOLDER, tag, message))
 
+    def send_loop_message(self, reactor_name: str, msg: LoopMessage):
+        self._publishers[reactor_name].publish(msg)
+
     def request_empty_event_at(self, reactor_name: str, tag: Tag):
         self._publishers[reactor_name].publish(RequestMessage(tag))
 
@@ -520,7 +518,7 @@ class ReactorConnections(RegisteredReactor):
 
     def _on_message(self, sender_name: str, msg : Any):
         if type(msg) is LoopMessage:
-            self._reactor.ledger._on_loop_message(msg) # TODO
+            self._reactor.ledger.on_loop_message(sender_name, msg)
         elif type(msg) is LoopDiscovery:
             self._on_loop_discovery(msg)
         elif type(msg) is LoopDetected:
