@@ -28,6 +28,8 @@ class Tag:
         return other < self
 
     def __eq__(self, other : Tag) -> bool:
+        if not isinstance(other, Tag):
+            return False
         return self.time == other.time and self.microstep == other.microstep
 
     def __ne__(self, other : Tag) -> bool:

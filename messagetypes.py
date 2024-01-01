@@ -32,7 +32,13 @@ class LoopDetected(LoopDiscovery):
     origin_input : str
 
 @dataclass 
-class LoopMessage : 
-    request_origin : str
-    success : bool # if false, its a request
+class LoopMessage: 
     tag : Tag
+
+@dataclass
+class LoopAcquireRequest(LoopMessage):
+    pass
+
+@dataclass
+class LoopAcquireResponse(LoopMessage):
+    pass
