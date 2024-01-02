@@ -25,6 +25,7 @@ class Tag:
         return False
 
     def __gt__(self, other : Tag) -> bool:
+        assert isinstance(other, Tag)
         return other < self
 
     def __eq__(self, other : Tag) -> bool:
