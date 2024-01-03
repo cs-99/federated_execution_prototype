@@ -1,7 +1,8 @@
-from tag import Tag
 from typing import List, Tuple, Optional, Any
 from dataclasses import dataclass
 
+from tag import Tag
+import utility
 
 @dataclass
 class ReleaseMessage:
@@ -31,14 +32,29 @@ class LoopDiscovery(MessageToInput):
 class LoopDetected(LoopDiscovery):
     origin_input : str
 
-@dataclass 
-class LoopMessage: 
+class Loop:
+    _loop_members : List[str]
+
+    def __init__(self, loop_members : List[str]):
+        self._loop_members = loop_members
+
+    def __contains__(self, item):
+        return item in self._loop_members
+    
+    def __iter__(self):
+        return iter(self._loop_members)
+
+    def __eq__(self, __value: object) -> bool:
+        if not isinstance(__value, Loop):
+            return False
+        return utility.are_lists_equal_with_rotation(self._loop_members, __value._loop_members)      
+
+    def get_next_loop_member(self, current_loop_member : str) -> str:
+        return utility.get_next_entry_with_rotation(self._loop_members, current_loop_member)
+
+@dataclass
+class LoopAcquireRequest:
     tag : Tag
+    origin : str
+    loop : Loop
 
-@dataclass
-class LoopAcquireRequest(LoopMessage):
-    pass
-
-@dataclass
-class LoopAcquireResponse(LoopMessage):
-    pass
