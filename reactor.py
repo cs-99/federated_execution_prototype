@@ -367,7 +367,7 @@ class LoopEntry:
         return self._loop == __value._loop
     
     def __hash__(self) -> int:
-        return hash(tuple(self._loop))
+        return hash(tuple(sorted(self._loop)))
     
     def __repr__(self) -> str:
         return f"LoopEntry({self._loop})"
