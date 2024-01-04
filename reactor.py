@@ -8,6 +8,7 @@ import time
 from typing import Callable, Dict, List, Optional, Set, Tuple, Any
 import threading
 import logging # thread safe by default
+import copy
 
 # custom files from here
 from tag import Tag
@@ -101,7 +102,7 @@ class Input(Port, TriggerAction):
             raise ValueError(f"{self._reactor}/{self.name} is already connected.")
         self._connected_reactor_name = reactor_name
         self._reactor.logger.debug(f"{self._reactor.name}/{self.name} connecting to {reactor_name}.")
-        self._reactor.connections.connect_to_reactor(reactor_name)
+        self._reactor.connections.connect_backwards(reactor_name)
         self._delay = delay
         self._is_connected = True
 
@@ -223,7 +224,7 @@ class Output(Port):
         self._connected_reactor_names : set[str] = set()
     
     def connect(self, reactor_name : str, input_name : str):
-        self._reactor.connections.connect_to_reactor(reactor_name)
+        self._reactor.connections.connect_forward(reactor_name)
         self._connected_reactor_names.add(reactor_name)
         self._reactor.connections.register_outgoing_connection(self.name, reactor_name, input_name)
 
@@ -494,16 +495,27 @@ class FederateLedger(RegisteredReactor):
         
 
 LF_CONNECTION_PREFIX = "__lf__"
+LF_BACKWARDS_CONNECTION_PREFIX = "__lf_backwards__"
 RECEIVING_INPUT_PLACEHOLDER = "__receiving_input__"
 class ReactorConnections(RegisteredReactor):
     def __init__(self, reactor: Reactor) -> None:
         super().__init__(reactor)
         self._outgoing_connections : Dict[str, List[Tuple[str, str]]] = {}
+        # these are for the regular connections (and discovery, release, loop acquire requests)
         self._publishers : Dict[str, Publisher] = {}
         self._subscribers : Dict[str, Subscriber] = {}
+        # these are for empty event schedule requests, since they go the other direction
+        # note: splitting the directions makes sure that messages are not handled by reactors that were not supposed to get the message
+        # i.e. imagine a -> b -> c without splitting directions, 
+        # would mean that b would receive all messages from a and c, as it has to subscribe to c for empty event requests
+        # note: this does not affect the loop discovery/acquire, as those just require in-order-delivery in one direction
+        self._backwards_publishers : Dict[str, Publisher] = {}
+        self._forward_subscribers: Dict[str, Subscriber] = {}
         self._reactor.register_release_tag_callback(self._on_release)
 
     def start_loop_discovery(self, output_name : str):
+        self._reactor.logger.debug(f"Starting loop discovery for {output_name}.")
+        self._reactor.logger.debug(f"{self._outgoing_connections}")
         self._send_message_to_connected_inputs(output_name, LoopDiscovery(RECEIVING_INPUT_PLACEHOLDER, self._reactor.name, output_name, []))
 
     def _on_release(self, tag : Tag):
@@ -513,9 +525,11 @@ class ReactorConnections(RegisteredReactor):
     def _send_message_to_connected_inputs(self, output_name : str, message : MessageToInput):
         if output_name not in self._outgoing_connections:
             return
+        set_receiving_input = message.receiving_input == RECEIVING_INPUT_PLACEHOLDER
         for connection in self._outgoing_connections[output_name]:
-            if message.receiving_input == RECEIVING_INPUT_PLACEHOLDER:
+            if set_receiving_input:
                 message.receiving_input = connection[1]
+            self._reactor.logger.debug(f"Sending {message} to {connection[0]}.")
             self._publishers[connection[0]].publish(message)
 
     def send_portmessage(self, output_name: str, tag: Tag, message: Any):
@@ -525,18 +539,27 @@ class ReactorConnections(RegisteredReactor):
         self._publishers[reactor_name].publish(msg)
 
     def request_empty_event_at(self, reactor_name: str, tag: Tag):
-        self._publishers[reactor_name].publish(RequestMessage(tag))
+        self._backwards_publishers[reactor_name].publish(RequestMessage(tag))
 
-    def connect_to_reactor(self, other_reactor_name: str):
+    def connect_backwards(self, other_reactor_name: str):
+        if other_reactor_name not in self._backwards_publishers:
+            self._backwards_publishers[other_reactor_name] = Publisher(LF_BACKWARDS_CONNECTION_PREFIX + self._reactor.name + "/" + other_reactor_name)
+            self._subscribers[other_reactor_name] = Subscriber(LF_CONNECTION_PREFIX + other_reactor_name + "/" + self._reactor.name, lambda msg: self._on_message(other_reactor_name, msg))
+
+    def connect_forward(self, other_reactor_name: str):
         if other_reactor_name not in self._publishers:
             self._publishers[other_reactor_name] = Publisher(LF_CONNECTION_PREFIX + self._reactor.name + "/" + other_reactor_name)
-            self._subscribers[other_reactor_name] = Subscriber(LF_CONNECTION_PREFIX + other_reactor_name + "/" + self._reactor.name, lambda msg: self._on_message(other_reactor_name, msg))
+            self._forward_subscribers[other_reactor_name] = Subscriber(LF_BACKWARDS_CONNECTION_PREFIX + other_reactor_name + "/" + self._reactor.name, lambda msg: self._on_empty_event_request(other_reactor_name, msg))
 
     def register_outgoing_connection(self, output_name, other_reactor_name: str, other_reactors_input):
         if output_name not in self._outgoing_connections:
             self._outgoing_connections[output_name] = [(other_reactor_name, other_reactors_input)]
         else:
             self._outgoing_connections[output_name].append((other_reactor_name, other_reactors_input))
+
+    def _on_empty_event_request(self, sender_name: str, msg: RequestMessage):
+        assert isinstance(msg, RequestMessage)
+        self._reactor.schedule_empty_async_at(msg.tag)
 
     def _on_message(self, sender_name: str, msg : Any):
         self._reactor.logger.debug(f"Message from {sender_name}: {msg}")
@@ -551,8 +574,6 @@ class ReactorConnections(RegisteredReactor):
             # self._reactor.ledger.release_other(sender_name, msg.tag) technically not necessary
         elif type(msg) is ReleaseMessage:
             self._reactor.ledger.release_other(sender_name, msg.tag)
-        elif type(msg) is RequestMessage:
-            self._reactor.schedule_empty_async_at(msg.tag)
         else:
             raise ValueError(f"Unknown message type: {msg}.")
         

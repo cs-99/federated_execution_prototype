@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 from typing import Callable, List, Any, Optional, Union
 import threading
 import logging
@@ -132,7 +133,8 @@ class Topic:
     
     def publish(self, message : Any):
         with self._topic_lock:
-            self._message_history.append(message)
+            copied_message = copy.deepcopy(message)
+            self._message_history.append(copied_message)
 
     def get_history(self):
         with self._topic_lock:

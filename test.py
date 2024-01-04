@@ -150,6 +150,34 @@ def create_deep_loop(start_tag : Tag, stop_tag : Tag, message_every_secs : float
     connect(reactors[3], "out", reactors[0], "in", 10)
     return reactors
 
+def create_split_loop(start_tag : Tag, stop_tag : Tag, message_every_secs : float = 0.5):
+    # this function creates reactors, such that:
+    # there is a loop of 3 reactors, a to b to c to a
+    # there is another arc going from b to d to a
+    reactors = []
+    reactors.append(Reactor("a", start_tag, stop_tag, ["in_c", "in_d"], ["out"],
+                    [TimerDeclaration("t", 0, secs_to_ns(message_every_secs))],
+                    [ReactionDeclaration("r", ["t"], ["out"])],
+                    ))
+    reactors.append(Reactor("b", start_tag, stop_tag, ["in"], ["out"],
+                    [],
+                    [ReactionDeclaration("r", ["in"], ["out"])],
+                    ))
+    reactors.append(Reactor("c", start_tag, stop_tag, ["in"], ["out"],
+                    [],
+                    [ReactionDeclaration("r", ["in"], ["out"])],
+                    ))
+    reactors.append(Reactor("d", start_tag, stop_tag, ["in"], ["out"],
+                    [],
+                    [ReactionDeclaration("r", ["in"], ["out"])],
+                    ))
+    connect(reactors[0], "out", reactors[1], "in")
+    connect(reactors[1], "out", reactors[2], "in")
+    connect(reactors[2], "out", reactors[0], "in_c", 10)
+    connect(reactors[1], "out", reactors[3], "in")
+    connect(reactors[3], "out", reactors[0], "in_d", 10)
+    return reactors
+
 
 if __name__ == "__main__":
     log_handlers : List[logging.Handler] = [
@@ -158,7 +186,7 @@ if __name__ == "__main__":
     ]
     # log level INFO logs only executed actions
     # log level DEBUG logs some coordination too
-    logging.basicConfig(handlers=log_handlers, level=logging.INFO)
+    logging.basicConfig(handlers=log_handlers, level=logging.DEBUG)
 
     # start at tag 1000 sec for better readability
     start_tag = Tag(secs_to_ns(1000)) 
@@ -167,7 +195,8 @@ if __name__ == "__main__":
     #reactors = create_pub_sub_reactors(start_tag, stop_tag)
     #reactors = create_cycle_reactors(start_tag, stop_tag)
     #reactors = create_double_cycle_reactors(start_tag, stop_tag)
-    reactors = create_deep_loop(start_tag, stop_tag)
+    # reactors = create_deep_loop(start_tag, stop_tag)
+    reactors = create_split_loop(start_tag, stop_tag)
     for reactor in reactors:
         logging.info(reactor)
     try:
