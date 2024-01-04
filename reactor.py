@@ -589,9 +589,9 @@ class ReactorConnections(RegisteredReactor):
                 # just dont mind at all whether the loop triggers itself without delay (as the user might actually want that)
                 self._reactor.logger.debug(f"Loop triggers itself.")
             # TODO: if the loop has no delay, all of the loop participants have to "release together", as the loop could come back around with a new event but still being at the same tag (aka loop release)
-            loop_detected_msg = LoopDetected(RECEIVING_INPUT_PLACEHOLDER, loop_discovery.origin, loop_discovery.origin_output, loop_discovery.entries, loop_discovery.receiving_input)
+            loop_detected_msg = LoopDetected(loop_discovery.entries[0][1], loop_discovery.origin, loop_discovery.origin_output, loop_discovery.entries, loop_discovery.receiving_input, current_entry=0)
             self._reactor.ledger.update_loop_members(loop_detected_msg)
-            self._send_message_to_connected_inputs(loop_discovery.origin_output, loop_detected_msg)
+            self._publishers[loop_discovery.entries[0][0]].publish(loop_detected_msg)
         else:
             affected_outputs = self._reactor.get_affected_outputs(self._reactor.get_input(loop_discovery.receiving_input))
             for output in affected_outputs:
@@ -601,14 +601,11 @@ class ReactorConnections(RegisteredReactor):
 
 
     def _on_loop_detected(self, loop_detected: LoopDetected):
-        if loop_detected.origin == self._reactor.name:
-            return
         self._reactor.ledger.update_loop_members(loop_detected)
-        for output in self._reactor.get_affected_outputs(self._reactor.get_input(loop_detected.receiving_input)):
-            loop_detected.receiving_input = RECEIVING_INPUT_PLACEHOLDER
-            self._send_message_to_connected_inputs(output.name, loop_detected)
-
-
+        next_index = loop_detected.current_entry + 1
+        if next_index < len(loop_detected.entries):
+            loop_detected.current_entry = next_index
+            self._publishers[loop_detected.entries[next_index][0]].publish(loop_detected)
     
 """
 Every Reactor is considered federate, therefore has their own scheduler (see run())

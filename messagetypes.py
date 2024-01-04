@@ -31,6 +31,7 @@ class LoopDiscovery(MessageToInput):
 @dataclass
 class LoopDetected(LoopDiscovery):
     origin_input : str
+    current_entry : int # index in entries list (origin excluded)
 
 class Loop:
     _loop_members : List[str]
