@@ -129,6 +129,7 @@ class Input(Port, TriggerAction):
                 return True
         # we have discovered that we are part of a loop (and have not requested the corresponding loop acquire yet)
         if self._reactor.ledger.is_loop_member(self._connected_reactor_name) \
+                and not self._reactor.ledger.check_loops_acquired(self._connected_reactor_name, tag) \
                 and not self._reactor.ledger.tag_requests_lte_open_in_loops(self._connected_reactor_name, tag):
             self._reactor.logger.debug(f"{self.name} requested loop acquire for {tag_before_delay}.")
             self._reactor.ledger.request_acquire_loops_where_is_member(self._connected_reactor_name, tag)
@@ -138,12 +139,16 @@ class Input(Port, TriggerAction):
             and  self._reactor.ledger.check_loops_acquired(self._connected_reactor_name, tag) \
             and tag_before_delay < tag:
                 return True
+        
+        if not self._reactor.ledger.is_loop_member(self._connected_reactor_name) \
+            or self._reactor.ledger.is_last_tag_fully_acquired_by_loops(self._connected_reactor_name, tag_before_delay):
+            self._reactor.connections.request_empty_event_at(self._connected_reactor_name, tag_before_delay)
         # or the predicate is true (i.e. the actionlist in the scheduling has been modified)
         return predicate()
     
-    def _loop_acquire_predicate(self, tag : Tag, tag_before_delay : Tag, loop_acquire_ids: Set[str], predicate : Callable[[None], bool]) -> bool:
+    def _loop_acquire_predicate(self, tag : Tag, tag_before_delay : Tag, loop_acquire_origins: Set[str], predicate : Callable[[None], bool]) -> bool:
         # if we are part of one of the requested loops
-        if self._reactor.ledger.is_part_of_same_loops(self._connected_reactor_name, loop_acquire_ids):
+        if self._reactor.ledger.is_part_of_same_loops(self._connected_reactor_name, loop_acquire_origins):
             return True
         
         # or we have acquired the tag normally
@@ -156,13 +161,16 @@ class Input(Port, TriggerAction):
         return new_tag
         
     
-    def loop_acquire_tag(self, tag : Tag, loop_acquire_ids: set[str], predicate : Callable[[None], bool] = lambda: False) -> bool:
+    def loop_acquire_tag(self, tag : Tag, loop_acquire_origins: Set[str], predicate : Callable[[None], bool] = lambda: False) -> bool:
         tag_before_delay = self._subtract_delay(tag)
         
         if not self._is_connected:
             return True
         
-        return self._reactor.wait_for(lambda: self._loop_acquire_predicate(tag, tag_before_delay, loop_acquire_ids, predicate))
+        if self._reactor.ledger.is_part_of_same_loops(self._connected_reactor_name, loop_acquire_origins):
+            return True
+        
+        return self._reactor.wait_for(lambda: self._loop_acquire_predicate(tag, tag_before_delay, loop_acquire_origins, predicate))
 
 
     def loop_dependencies_released(self, loop_acquire_origins: Set[str], tag: Tag) -> bool:
@@ -192,11 +200,12 @@ class Input(Port, TriggerAction):
                 return True
         
         if self._reactor.ledger.is_loop_member(self._connected_reactor_name) \
-            and  self._reactor.ledger.check_loops_acquired(self._connected_reactor_name, tag) \
+            and self._reactor.ledger.check_loops_acquired(self._connected_reactor_name, tag) \
             and tag_before_delay < tag:
                 return True
         
         if self._reactor.ledger.is_loop_member(self._connected_reactor_name) \
+            and not self._reactor.ledger.check_loops_acquired(self._connected_reactor_name, tag) \
             and not self._reactor.ledger.tag_requests_lte_open_in_loops(self._connected_reactor_name, tag):
                 self._reactor.ledger.request_acquire_loops_where_is_member(self._connected_reactor_name, tag)
                 return False
@@ -344,12 +353,8 @@ LOOP_PREFIX = "__loop__"
 class LoopEntry:
     def __init__(self, loop : Loop) -> None:
         self._loop : Loop = loop
-        self.we_requested_loop_acquire : Optional[Tag] = None
-        self._last_tag_loop_acquired : Tag = Tag(0, 0)
-    
-    @property
-    def last_tag_loop_acquired(self) -> Tag:
-        return self._last_tag_loop_acquired
+        self.self_requested : Optional[Tag] = None
+        self.last_tag_loop_acquired : Tag = Tag(0, 0)
 
     @property
     def loop(self) -> Loop:
@@ -394,19 +399,31 @@ class FederateLedger(RegisteredReactor):
 
     def on_loop_acquire_request(self, sender_name : str, request: LoopAcquireRequest):
         self._reactor.logger.debug(f"Loop acquire request from {sender_name} at {request.tag}, originating at {request.origin} in loop {request.loop}.")
-        if self._reactor.name == request.origin:
-            with self._loops_lock:
-                for loop_entry in self._loops:
-                    if loop_entry.loop == request.loop:
-                        loop_entry._last_tag_loop_acquired = request.tag
-                        loop_entry.we_requested_loop_acquire = None
-                        self._reactor.logger.debug(f"Loop {loop_entry} acquired {request.tag}.")
-                        break
-            self._reactor.notify()
+        if self._reactor.name != request.origin:
+            if self._reactor.schedule_loop_acquire_async(request.tag, request.origin, request.loop):
+                pass
+            else:
+                self._reactor.connections.send_loop_ac_req(request.loop.get_next_loop_member(self._reactor.name), request)
             return
-        self._reactor.schedule_loop_acquire_async(request.tag, request.origin, request.loop)
+            
+        with self._loops_lock:
+            for loop_entry in self._loops:
+                if loop_entry.loop == request.loop:
+                    if loop_entry.self_requested != request.tag:
+                        # this is not the last request we sent, 
+                        # therefore another (earlier) event must have occured
+                        # that event could have scheduled events in the loop which are behind the request received here
+                        # that message is useless now
+                        return
+                    loop_entry.last_tag_loop_acquired = request.tag
+                    loop_entry.self_requested = None
+                    self._reactor.logger.debug(f"Loop {loop_entry} acquired {request.tag}.")
+                    break
+        self._reactor.notify()
+        return
+        
 
-    def is_part_of_same_loops(self, reactor_name: str, request_origins: set[str]) -> bool:
+    def is_part_of_same_loops(self, reactor_name: str, request_origins: Set[str]) -> bool:
         with self._loops_lock:
             for loop in self._loops:
                 if reactor_name in loop:
@@ -427,16 +444,16 @@ class FederateLedger(RegisteredReactor):
         with self._loops_lock:
             for loop in self._loops:
                 if reactor_name in loop:
-                    loop.we_requested_loop_acquire = tag
+                    loop.self_requested = tag
                     self._reactor.schedule_loop_acquire_sync(tag, self._reactor.name, loop.loop)
     
     def tag_requests_lte_open_in_loops(self, reactor_name: str, tag: Tag) -> bool:
         with self._loops_lock:
             for loop in self._loops:
                 if reactor_name in loop:
-                    if loop.we_requested_loop_acquire is None:
+                    if loop.self_requested is None:
                         return False
-                    if not loop.we_requested_loop_acquire <= tag:
+                    if not loop.self_requested <= tag:
                         return False
             return True
 
@@ -828,12 +845,18 @@ class Reactor(Named):
                 self.logger.debug(f"next tag is {next_tag}.")
                 if loop_acquire_requests:
                     for input in self._inputs:
-                        result : bool = input.loop_acquire_tag(next_tag, loop_acquire_requests, lambda: self._get_next_tag() != (next_tag, loop_acquire_requests))
+                        result : bool = input.loop_acquire_tag(next_tag, loop_acquire_requests.keys(), lambda: self._get_next_tag() != (next_tag, loop_acquire_requests))
                         if not result or self._get_next_tag() != (next_tag, loop_acquire_requests): # acquire_tag failed or new event
                             refetch_next_tag = True
                             self.logger.debug(f"refetching next tag.")
                             break
                     if refetch_next_tag:
+                        continue
+
+                    # we got a request from a loop, and need to acquire the other loops we are part of
+                    if self.name in loop_acquire_requests:
+                        self._ledger.forward_loop_acquire_requests(next_tag, {self.name: loop_acquire_requests[self.name]})
+                        self._loop_acquiries.remove_request(next_tag, set([self.name]))
                         continue
                     self._ledger.forward_loop_acquire_requests(next_tag, loop_acquire_requests)
                     self._loop_acquiries.remove_request(next_tag, loop_acquire_requests.keys())

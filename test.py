@@ -98,7 +98,7 @@ def create_cycle_reactors(start_tag : Tag, stop_tag : Tag, message_every_secs : 
 
 def create_double_cycle_reactors(start_tag : Tag, stop_tag : Tag, 
         message_every_secs_1 : float = 0.5, delay_1 : float = 0.1,
-        message_every_secs_2 : float = 0.5, delay_2 : float = 0.1) -> List[Reactor]:
+        message_every_secs_2 : float = 0.5, delay_2 : float = 0.2) -> List[Reactor]:
     reactors = []
     reactors.append(Reactor("a", start_tag, stop_tag, 
                         ["in"], 
@@ -165,9 +165,9 @@ if __name__ == "__main__":
     stop_tag = start_tag.delay(secs_to_ns(5))
     #reactors : List[Reactor] = [create_random_reactor(f"random_reactor{i}", start_tag, stop_tag) for i in range(1)]
     #reactors = create_pub_sub_reactors(start_tag, stop_tag)
-    reactors = create_cycle_reactors(start_tag, stop_tag)
-    #reactors = create_double_cycle_reactors(start_tag, stop_tag, delay_1=0.01)
-    #reactors = create_deep_loop(start_tag, stop_tag)
+    #reactors = create_cycle_reactors(start_tag, stop_tag)
+    #reactors = create_double_cycle_reactors(start_tag, stop_tag)
+    reactors = create_deep_loop(start_tag, stop_tag)
     for reactor in reactors:
         logging.info(reactor)
     try:
