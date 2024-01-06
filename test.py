@@ -250,8 +250,8 @@ if __name__ == "__main__":
     #reactors = create_double_cycle_reactors(start_tag, stop_tag)
     #reactors = create_deep_loop(start_tag, stop_tag)
     #reactors = create_split_loop(start_tag, stop_tag)
-    #reactors = create_loop_with_member_twice(start_tag, stop_tag)
-    reactors = create_loop_with_external_inputs(start_tag, stop_tag)
+    reactors = create_loop_with_member_twice(start_tag, stop_tag)
+    #reactors = create_loop_with_external_inputs(start_tag, stop_tag)
     for reactor in reactors:
         logging.info(reactor)
     try:

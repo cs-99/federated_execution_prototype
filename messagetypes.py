@@ -58,4 +58,5 @@ class LoopAcquireRequest:
     tag : Tag
     origin : str
     loop : Loop
+    request_id : int
 
