@@ -850,14 +850,13 @@ class Reactor(Named):
         self._logger.debug(f"Thread id: {threading.current_thread().ident}.")
         for output in self._outputs:
             output.start_loop_discovery()
-        # TODO: remove this and make sure to handle the case where release messages are still "on air" while loop acquiring
         # some ideas:
         # either: on loop_detected_message, send the current tag with it and stop the main loop until the message comes back with the same tag
                 # if a federate received that message, it tries to stop at the same tag and relays the message with the tag it actually stopped at
                 # if the tag was altered, repeat with higher tag
                 # -> probably the better version for transient federates
         # or: acknowledge loop_discovery messages backwards on dead ends, such that the discovery phase can be finished completely before starting at all
-        time.sleep(2)
+        #time.sleep(2)
         with self._reaction_q_cv:
             self._schedule_timers_once()
         # releasing the tag directly before the start tag here

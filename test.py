@@ -144,10 +144,10 @@ def create_deep_loop(start_tag : Tag, stop_tag : Tag, message_every_secs : float
                     [],
                     [ReactionDeclaration("r", ["in"], ["out"])],
                     ))
-    connect(reactors[0], "out", reactors[1], "in")
+    connect(reactors[0], "out", reactors[1], "in",10)
     connect(reactors[1], "out", reactors[2], "in")
     connect(reactors[2], "out", reactors[3], "in")
-    connect(reactors[3], "out", reactors[0], "in", 10)
+    connect(reactors[3], "out", reactors[0], "in")
     return reactors
 
 def create_split_loop(start_tag : Tag, stop_tag : Tag, message_every_secs : float = 0.5):
@@ -200,10 +200,10 @@ def create_loop_with_member_twice(start_tag : Tag, stop_tag : Tag, message_every
     connect(reactors[2], "out", reactors[0], "in_c", 10)
     return reactors
 
-def create_loop_with_external_inputs(start_tag : Tag, stop_tag : Tag):
+def create_loop_with_external_input_and_output(start_tag : Tag, stop_tag : Tag):
     reactors = []
     reactors.append(Reactor("a", start_tag, stop_tag, ["in", "outside_in"], ["out"],
-                    [TimerDeclaration("t", 0, secs_to_ns(0.5))],
+                    [],
                     [ReactionDeclaration("r", ["outside_in"], ["out"])],
                     ))
     reactors.append(Reactor("b", start_tag, stop_tag, ["in"], ["out"],
@@ -218,17 +218,21 @@ def create_loop_with_external_inputs(start_tag : Tag, stop_tag : Tag):
                     [],
                     [ReactionDeclaration("r", ["in"], ["out"])],
                     ))
-    reactors.append(Reactor("outside", start_tag, stop_tag, [], ["out"],
+    reactors.append(Reactor("outside_dep", start_tag, stop_tag, [], ["out"],
                     [TimerDeclaration("t", 0, secs_to_ns(0.3))],
                     [ReactionDeclaration("r", ["t"], ["out"])],
+                    ))
+    reactors.append(Reactor("outside", start_tag, stop_tag, ["in"], [],
+                    [],
+                    []
                     ))
                             
     connect(reactors[0], "out", reactors[1], "in")
     connect(reactors[1], "out", reactors[2], "in")
     connect(reactors[2], "out", reactors[3], "in")
     connect(reactors[3], "out", reactors[0], "in", 10)
-    connect(reactors[4], "out", reactors[0], "outside_in")
     connect(reactors[4], "out", reactors[2], "outside_in")
+    connect(reactors[1], "out", reactors[5], "in")
     return reactors
 
 
@@ -250,8 +254,8 @@ if __name__ == "__main__":
     #reactors = create_double_cycle_reactors(start_tag, stop_tag)
     #reactors = create_deep_loop(start_tag, stop_tag)
     #reactors = create_split_loop(start_tag, stop_tag)
-    reactors = create_loop_with_member_twice(start_tag, stop_tag)
-    #reactors = create_loop_with_external_inputs(start_tag, stop_tag)
+    #reactors = create_loop_with_member_twice(start_tag, stop_tag)
+    reactors = create_loop_with_external_input_and_output(start_tag, stop_tag)
     for reactor in reactors:
         logging.info(reactor)
     try:
